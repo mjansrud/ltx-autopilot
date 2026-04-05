@@ -156,32 +156,6 @@ class PipelineOrchestrator:
         if not cleanup_cfg.get("delete_after_training", True):
             return
 
-        # Only delete precomputed data (latents are large and batch-specific)
-        precomputed = self.work_dir / "precomputed"
-        if precomputed.exists():
-            shutil.rmtree(precomputed, ignore_errors=True)
-
-        # Keep raw/, scenes/, metadata.jsonl in cache for reuse
-        cache_dir = Path("./workspace/history")
-        cache_dir.mkdir(exist_ok=True)
-        for subdir in ["raw", "scenes"]:
-            src = self.work_dir / subdir
-            if src.exists():
-                dst = cache_dir / subdir
-                dst.mkdir(exist_ok=True)
-                for f in src.glob("*.mp4"):
-                    target = dst / f.name
-                    if not target.exists():
-                        shutil.move(str(f), str(target))
-
-        # Cache captions
-        meta_src = self.work_dir / "metadata.jsonl"
-        if meta_src.exists():
-            cache_meta = cache_dir / "captions.jsonl"
-            # Append new captions
-            with open(cache_meta, "a", encoding="utf-8") as out:
-                out.write(meta_src.read_text(encoding="utf-8"))
-
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
@@ -190,6 +164,29 @@ class PipelineOrchestrator:
         self._prune_history(max_gb)
 
         dash.show_cleanup(False)
+
+    def _save_to_history(self):
+        """Cache scenes + captions to history right after captioning."""
+        history = Path("./workspace/history")
+        history.mkdir(parents=True, exist_ok=True)
+
+        for subdir in ["scenes"]:
+            src = self.work_dir / subdir
+            if src.exists():
+                dst = history / subdir
+                dst.mkdir(exist_ok=True)
+                for f in src.glob("*.mp4"):
+                    target = dst / f.name
+                    if not target.exists():
+                        shutil.copy2(f, target)
+
+        meta_src = self.work_dir / "metadata.jsonl"
+        if meta_src.exists():
+            cache_meta = history / "captions.jsonl"
+            with open(cache_meta, "a", encoding="utf-8") as out:
+                out.write(meta_src.read_text(encoding="utf-8"))
+
+        log.info("[HISTORY] Cached scenes + captions")
 
     def _prune_history(self, max_gb: float):
         """Delete oldest clips from history when it exceeds max_gb."""
@@ -293,6 +290,9 @@ class PipelineOrchestrator:
 
             # Show the generated captions
             dash.show_captions(metadata_file)
+
+        # Cache to history immediately (before preprocessing which may OOM)
+        self._save_to_history()
 
         # ── 4. Preprocess (runs as subprocess) ─────────────────────
         with vram_stage("preprocessing"):
