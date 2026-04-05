@@ -161,14 +161,20 @@ class TransformersCaptioner:
         elif self.load_in_8bit:
             quant_config = BitsAndBytesConfig(load_in_8bit=True)
 
-        # Try Omni full model first (thinker-only index skips talker/token2wav weights),
-        # then VL (video-only), then generic
+        # Detect model type from config, then load the right class
+        import json
+        model_config = json.loads(Path(self.model_id, "config.json").read_text())
+        model_type = model_config.get("model_type", "")
+
+        if "omni" in model_type:
+            class_names = ["Qwen2_5OmniForConditionalGeneration"]
+        elif "qwen2_5_vl" in model_type or "qwen2_vl" in model_type:
+            class_names = ["Qwen2_5_VLForConditionalGeneration"]
+        else:
+            class_names = ["AutoModelForCausalLM"]
+
         model_loaded = False
-        for auto_cls_name in [
-            "Qwen2_5OmniForConditionalGeneration",
-            "Qwen2_5_VLForConditionalGeneration",
-            "AutoModelForCausalLM",
-        ]:
+        for auto_cls_name in class_names:
             try:
                 if auto_cls_name.startswith("Qwen"):
                     mod = __import__("transformers", fromlist=[auto_cls_name])
@@ -182,7 +188,6 @@ class TransformersCaptioner:
                     device_map="auto",
                     trust_remote_code=True,
                 )
-                # For Omni: cap GPU usage, overflow to CPU
                 if "Omni" in auto_cls_name:
                     load_kwargs["max_memory"] = {0: "28GiB", "cpu": "40GiB"}
 
@@ -197,8 +202,9 @@ class TransformersCaptioner:
         if not model_loaded:
             raise RuntimeError(f"Could not load model {self.model_id} with any known class")
 
-        # Load processor (try Omni first, then AutoProcessor)
-        for proc_cls_name in ["Qwen2_5OmniProcessor", "AutoProcessor"]:
+        # Load processor
+        proc_order = ["Qwen2_5OmniProcessor", "AutoProcessor"] if "omni" in model_type else ["AutoProcessor"]
+        for proc_cls_name in proc_order:
             try:
                 if proc_cls_name != "AutoProcessor":
                     mod = __import__("transformers", fromlist=[proc_cls_name])
