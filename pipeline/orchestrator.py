@@ -65,6 +65,53 @@ class PipelineOrchestrator:
     def _ensure_work_dir(self):
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
+    def _restore_from_cache(self, scenes_dir: Path, metadata_file: Path) -> list[Path] | None:
+        """Try to restore scenes + captions from cache. Returns scene clips if found."""
+        cache_dir = Path("./history")
+        cache_scenes = cache_dir / "scenes"
+        cache_captions = cache_dir / "captions.jsonl"
+
+        if not cache_scenes.exists() or not cache_captions.exists():
+            return None
+
+        cached_clips = sorted(cache_scenes.glob("*.mp4"))
+        if not cached_clips:
+            return None
+
+        # Copy cached scenes into workspace
+        scenes_dir.mkdir(parents=True, exist_ok=True)
+        for clip in cached_clips:
+            dst = scenes_dir / clip.name
+            if not dst.exists():
+                shutil.copy2(clip, dst)
+
+        # Build metadata with only clips that have captions
+        captioned = {}
+        for line in cache_captions.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entry = json.loads(line)
+                # Key by filename
+                name = Path(entry["media_path"]).name
+                captioned[name] = entry
+
+        # Write metadata for clips we have captions for
+        scene_clips = sorted(scenes_dir.glob("*.mp4"))
+        matched = []
+        with open(metadata_file, "w", encoding="utf-8") as f:
+            for clip in scene_clips:
+                if clip.name in captioned:
+                    entry = captioned[clip.name]
+                    # Update path to be relative to workspace
+                    entry["media_path"] = str(clip.relative_to(self.work_dir))
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                    matched.append(clip)
+
+        if matched:
+            log.info("[CACHE] Restored %d/%d clips with captions from cache", len(matched), len(scene_clips))
+            return matched
+
+        return None
+
     def _prefetch_batch(self, batch_num: int, work_dir: Path) -> tuple[list[Path], list[Path]]:
         """Download + scene-split for a future batch (CPU only, no GPU)."""
         raw_dir = work_dir / "raw"
@@ -103,11 +150,37 @@ class PipelineOrchestrator:
             return None
 
     def _cleanup(self):
-        """Remove temporary batch data, keep checkpoints and evaluations."""
+        """Remove precomputed latents but keep scenes + captions in cache."""
         cleanup_cfg = self.cfg.get("cleanup", {})
 
         if not cleanup_cfg.get("delete_after_training", True):
             return
+
+        # Only delete precomputed data (latents are large and batch-specific)
+        precomputed = self.work_dir / "precomputed"
+        if precomputed.exists():
+            shutil.rmtree(precomputed, ignore_errors=True)
+
+        # Keep raw/, scenes/, metadata.jsonl in cache for reuse
+        cache_dir = Path("./history")
+        cache_dir.mkdir(exist_ok=True)
+        for subdir in ["raw", "scenes"]:
+            src = self.work_dir / subdir
+            if src.exists():
+                dst = cache_dir / subdir
+                dst.mkdir(exist_ok=True)
+                for f in src.glob("*.mp4"):
+                    target = dst / f.name
+                    if not target.exists():
+                        shutil.move(str(f), str(target))
+
+        # Cache captions
+        meta_src = self.work_dir / "metadata.jsonl"
+        if meta_src.exists():
+            cache_meta = cache_dir / "captions.jsonl"
+            # Append new captions
+            with open(cache_meta, "a", encoding="utf-8") as out:
+                out.write(meta_src.read_text(encoding="utf-8"))
 
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir, ignore_errors=True)
