@@ -178,7 +178,10 @@ class SceneSplitter:
             dur = (end - start).get_seconds()
             cmd = [
                 "ffmpeg", "-y", "-ss", f"{ss:.3f}", "-i", str(video),
-                "-t", f"{dur:.3f}", "-c", "copy", "-avoid_negative_ts", "1",
+                "-t", f"{dur:.3f}",
+                "-c:v", "copy",           # video: stream copy (fast)
+                "-c:a", "aac", "-b:a", "128k",  # audio: re-encode to AAC (compatible)
+                "-avoid_negative_ts", "1",
                 str(out_path),
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")

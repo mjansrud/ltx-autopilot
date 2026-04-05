@@ -54,7 +54,7 @@ class Trainer:
             "training_strategy": {
                 "name": "text_to_video",
                 "first_frame_conditioning_p": 0.5,
-                "with_audio": False,
+                "with_audio": True,
                 "audio_latents_dir": "audio_latents",
             },
             "optimization": {
@@ -110,8 +110,8 @@ class Trainer:
                 "guidance_scale": eval_cfg.get("guidance_scale", 4.0),
                 "stg_scale": 1.0,
                 "stg_blocks": [29],
-                "stg_mode": "stg_v",
-                "generate_audio": False,
+                "stg_mode": "stg_av",
+                "generate_audio": True,
                 "skip_initial_validation": True,
             }
 
