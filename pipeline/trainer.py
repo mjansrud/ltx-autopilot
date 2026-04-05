@@ -54,22 +54,23 @@ class Trainer:
             "training_strategy": {
                 "name": "text_to_video",
                 "first_frame_conditioning_p": 0.5,
-                "with_audio": False,
+                "with_audio": True,
+                "audio_latents_dir": "audio_latents",
             },
             "optimization": {
                 "learning_rate": self.cfg["learning_rate"],
                 "steps": self.cfg["steps_per_batch"],
                 "batch_size": self.cfg.get("batch_size", 1),
                 "gradient_accumulation_steps": self.cfg.get("gradient_accumulation_steps", 4),
-                "max_grad_norm": 1.0,
-                "optimizer_type": "adamw",
+                "max_grad_norm": self.cfg.get("max_grad_norm", 1.0),
+                "optimizer_type": self.cfg.get("optimizer", "adamw"),
                 "scheduler_type": self.cfg.get("lr_scheduler", "cosine"),
-                "scheduler_params": {},
+                "scheduler_params": {"num_warmup_steps": self.cfg.get("warmup_steps", 100)},
                 "enable_gradient_checkpointing": self.cfg.get("gradient_checkpointing", True),
             },
             "acceleration": {
                 "mixed_precision_mode": self.cfg.get("mixed_precision", "bf16"),
-                "quantization": None,  # quanto quantization not used
+                "quantization": None,
                 "load_text_encoder_in_8bit": True,
             },
             "data": {
@@ -101,13 +102,16 @@ class Trainer:
                 "prompts": eval_cfg["prompts"],
                 "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
                 "video_dims": [w, h, f],
-                "frame_rate": eval_cfg.get("fps", 25),
+                "frame_rate": eval_cfg.get("fps", 25.0),
                 "seed": 42,
                 "inference_steps": eval_cfg.get("num_inference_steps", 30),
-                "interval": eval_cfg.get("every_n_steps", 250),
+                "interval": eval_cfg.get("every_n_steps", 100),
                 "videos_per_prompt": 1,
                 "guidance_scale": eval_cfg.get("guidance_scale", 4.0),
-                "generate_audio": False,
+                "stg_scale": 1.0,
+                "stg_blocks": [29],
+                "stg_mode": "stg_av",
+                "generate_audio": True,
                 "skip_initial_validation": True,
             }
 
