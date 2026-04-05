@@ -239,45 +239,57 @@ class TransformersCaptioner:
             return self._caption_vl(video_path, instruction)
 
     def _caption_omni(self, video_path: Path, instruction: str) -> str:
-        """Caption using Qwen2.5-Omni (video+audio input, cv2+ffmpeg for Windows compat)."""
+        """Caption using Qwen2.5-Omni (pass pre-loaded tensors, no torchcodec needed)."""
         import torch
         import subprocess
         import tempfile
+        import numpy as np
         from PIL import Image
 
-        # Extract frames with cv2 (bypass torchcodec)
+        # Extract frames with cv2
         raw_frames = extract_frames(video_path, self.fps, min(self.max_frames, 16))
         if not raw_frames:
             return "[VISUAL]: Unable to extract frames from video."
         pil_frames = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in raw_frames]
 
-        # Build message content with images
-        content = [{"type": "text", "text": instruction}]
-        for frame in pil_frames:
-            content.append({"type": "image", "image": frame})
+        # Build message with image placeholders
+        content = []
+        for _ in pil_frames:
+            content.append({"type": "image"})
+        content.append({"type": "text", "text": instruction})
 
-        # Extract audio with ffmpeg if enabled
-        audio_path = None
+        # Extract audio with ffmpeg as numpy array
+        audio_array = None
         if self.include_audio:
             try:
                 tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                audio_path = tmp.name
+                tmp_path = tmp.name
                 tmp.close()
                 cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
-                       "-ar", "16000", "-ac", "1", audio_path]
-                subprocess.run(cmd, capture_output=True, timeout=30)
-                content.append({"type": "audio", "audio": audio_path})
+                       "-ar", "16000", "-ac", "1", tmp_path]
+                result = subprocess.run(cmd, capture_output=True, timeout=30)
+                if result.returncode == 0:
+                    from scipy.io import wavfile
+                    sr, data = wavfile.read(tmp_path)
+                    if data.dtype == np.int16:
+                        data = data.astype(np.float32) / 32768.0
+                    audio_array = data.reshape(1, -1)  # [channels, samples]
+                    content.insert(0, {"type": "audio"})
+                import os
+                os.unlink(tmp_path)
             except Exception as e:
                 log.debug("Audio extraction failed for captioning: %s", e)
-                audio_path = None
 
         messages = [
             {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
             {"role": "user", "content": content},
         ]
 
+        # Pass pre-loaded tensors directly (bypasses torchcodec file loading)
         inputs = self.processor.apply_chat_template(
             messages,
+            images=pil_frames,
+            audios=[audio_array] if audio_array is not None else None,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
@@ -294,14 +306,6 @@ class TransformersCaptioner:
                 do_sample=False,
                 max_new_tokens=self.max_new_tokens,
             )
-
-        # Clean up temp audio
-        if audio_path:
-            try:
-                import os
-                os.unlink(audio_path)
-            except Exception:
-                pass
 
         caption = self.processor.batch_decode(
             output[:, input_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False
