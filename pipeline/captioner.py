@@ -176,13 +176,18 @@ class TransformersCaptioner:
                 else:
                     cls = AutoModelForCausalLM
 
-                self.model = cls.from_pretrained(
-                    self.model_id,
+                load_kwargs = dict(
                     torch_dtype=torch_dtype,
                     quantization_config=quant_config,
                     device_map="auto",
                     trust_remote_code=True,
                 )
+                # For Omni: cap GPU to 20GB, spill talker/token2wav to CPU
+                if "Omni" in auto_cls_name:
+                    load_kwargs["max_memory"] = {0: "20GiB", "cpu": "40GiB"}
+                    load_kwargs.pop("quantization_config")  # 8bit doesn't work with Omni
+
+                self.model = cls.from_pretrained(self.model_id, **load_kwargs)
                 model_loaded = True
                 log.info("Loaded model with %s", auto_cls_name)
                 break
