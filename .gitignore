@@ -1,0 +1,31 @@
+# Virtual environments
+.venv/
+
+# Models (large files)
+models/
+checkpoints/
+
+# LTX-2 trainer (submodule or cloned repo)
+LTX-2/
+
+# Lustpress server
+lustpress/
+
+# Runtime data
+workspace/
+history/
+metadata_archive/
+state/
+evaluations/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config with local paths
+config.yaml
