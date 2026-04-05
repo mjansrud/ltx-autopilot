@@ -242,9 +242,16 @@ class PipelineOrchestrator:
         dash.show_batch_header(batch, self.state.total_steps, query, sources)
         dash.show_vram_status("batch start", get_vram_usage())
 
-        # ── 1+2. Crawl + Split (use prefetch if available) ────────
-        prefetched = self._collect_prefetch()
-        if prefetched and prefetched[0]:
+        # ── 1+2. Try history cache → prefetch → fresh download ─────
+        cached = self._restore_from_cache(scenes_dir, metadata_file)
+        prefetched = self._collect_prefetch() if not cached else None
+
+        if cached:
+            scene_videos = cached
+            videos = cached
+            log.info("[1-3/6] Restored %d clips from history (skip download+split+caption)", len(cached))
+            dash.show_scene_split(len(cached), len(cached), scenes_dir)
+        elif prefetched and prefetched[0]:
             videos, scene_videos = prefetched
             # Move prefetched data into current workspace
             next_work = Path("./workspace/prefetch")
@@ -274,25 +281,25 @@ class PipelineOrchestrator:
                     scene_videos = videos
                 dash.show_scene_split(len(videos), len(scene_videos), split_dir)
 
-        # ── 3. Caption (MODEL LOADED → UNLOADED) ──────────────────
-        with vram_stage("captioning"):
-            log.info("[3/6] Captioning %d clips (loading model → GPU)...", len(scene_videos))
-            dash.section("CAPTIONING")
-            print(f"  Loading model: {self.cfg['captioner'].get('model_id', 'unknown')}")
-            dash.show_vram_status("before caption model load", get_vram_usage())
+        # ── 3. Caption (skip if restored from cache) ─────────────
+        if not cached:
+            with vram_stage("captioning"):
+                log.info("[3/6] Captioning %d clips (loading model → GPU)...", len(scene_videos))
+                dash.section("CAPTIONING")
+                print(f"  Loading model: {self.cfg['captioner'].get('model_id', 'unknown')}")
+                dash.show_vram_status("before caption model load", get_vram_usage())
 
-            # caption_batch handles load() and unload() internally
-            self.captioner.caption_batch(scene_videos, metadata_file)
+                self.captioner.caption_batch(scene_videos, metadata_file)
 
-            # Model is now UNLOADED — GPU is free
-            flush_vram()
-            dash.show_vram_status("after caption model unload", get_vram_usage())
+                # Model is now UNLOADED — GPU is free
+                flush_vram()
+                dash.show_vram_status("after caption model unload", get_vram_usage())
 
-            # Show the generated captions
-            dash.show_captions(metadata_file)
+                # Show the generated captions
+                dash.show_captions(metadata_file)
 
-        # Cache to history immediately (before preprocessing which may OOM)
-        self._save_to_history()
+            # Cache to history immediately (before preprocessing which may OOM)
+            self._save_to_history()
 
         # ── 4. Preprocess (runs as subprocess) ─────────────────────
         with vram_stage("preprocessing"):

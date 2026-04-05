@@ -161,10 +161,11 @@ class TransformersCaptioner:
         elif self.load_in_8bit:
             quant_config = BitsAndBytesConfig(load_in_8bit=True)
 
-        # Try Omni first (audio+video), then VL (video-only), then generic
+        # Try Omni full model first (thinker-only index skips talker/token2wav weights),
+        # then VL (video-only), then generic
         model_loaded = False
         for auto_cls_name in [
-            "Qwen2_5OmniThinkerForConditionalGeneration",
+            "Qwen2_5OmniForConditionalGeneration",
             "Qwen2_5_VLForConditionalGeneration",
             "AutoModelForCausalLM",
         ]:
@@ -175,22 +176,11 @@ class TransformersCaptioner:
                 else:
                     cls = AutoModelForCausalLM
 
-                # For Omni Thinker: internal names don't have "thinker." prefix
-                dmap = "auto"
-                if "OmniThinker" in auto_cls_name:
-                    dmap = {
-                        "model": "cuda:0",
-                        "lm_head": "cuda:0",
-                        "audio_tower": "cuda:0",
-                        "visual": "cuda:0",
-                    }
-
                 self.model = cls.from_pretrained(
                     self.model_id,
                     torch_dtype=torch_dtype,
                     quantization_config=quant_config,
-                    device_map=dmap,
-                    low_cpu_mem_usage=True,
+                    device_map="auto",
                     trust_remote_code=True,
                 )
                 model_loaded = True
