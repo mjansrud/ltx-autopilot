@@ -161,11 +161,11 @@ class TransformersCaptioner:
         elif self.load_in_8bit:
             quant_config = BitsAndBytesConfig(load_in_8bit=True)
 
-        # Try VL first (most common), then Omni (audio+video), then generic
+        # Try Omni first (audio+video), then VL (video-only), then generic
         model_loaded = False
         for auto_cls_name in [
-            "Qwen2_5_VLForConditionalGeneration",
             "Qwen2_5OmniThinkerForConditionalGeneration",
+            "Qwen2_5_VLForConditionalGeneration",
             "AutoModelForCausalLM",
         ]:
             try:
@@ -193,8 +193,8 @@ class TransformersCaptioner:
         if not model_loaded:
             raise RuntimeError(f"Could not load model {self.model_id} with any known class")
 
-        # Load processor (try AutoProcessor first — works for VL and most models)
-        for proc_cls_name in ["AutoProcessor", "Qwen2_5OmniProcessor"]:
+        # Load processor (try Omni first, then AutoProcessor)
+        for proc_cls_name in ["Qwen2_5OmniProcessor", "AutoProcessor"]:
             try:
                 if proc_cls_name != "AutoProcessor":
                     mod = __import__("transformers", fromlist=[proc_cls_name])
