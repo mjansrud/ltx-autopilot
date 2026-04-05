@@ -56,6 +56,10 @@ class Preprocessor:
         if self.with_audio:
             cmd.append("--with-audio")
 
+        # Low VRAM optimizations for 32GB GPUs
+        cmd.append("--vae-tiling")
+        cmd.append("--load-text-encoder-in-8bit")
+
         log.info("Running preprocessing: %s", " ".join(cmd))
 
         # The LTX scripts import sibling modules (decode_latents, process_captions, etc.)
