@@ -70,7 +70,7 @@ class Trainer:
             "acceleration": {
                 "mixed_precision_mode": self.cfg.get("mixed_precision", "bf16"),
                 "quantization": None,  # quanto quantization not used
-                "load_text_encoder_in_8bit": bool(self.cfg.get("quantize")),
+                "load_text_encoder_in_8bit": True,
             },
             "data": {
                 "preprocessed_data_root": str(Path(precomputed_dir).resolve()),

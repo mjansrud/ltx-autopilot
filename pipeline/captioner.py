@@ -11,8 +11,12 @@ Supports three backends:
 import base64
 import json
 import logging
+import os
 import re
 from pathlib import Path
+
+# Force decord for video reading (torchvision 0.26+ removed read_video, torchcodec missing on Windows)
+os.environ["FORCE_QWENVL_VIDEO_READER"] = "decord"
 
 import cv2
 
@@ -271,31 +275,26 @@ class TransformersCaptioner:
         return clean_caption(caption)
 
     def _caption_vl(self, video_path: Path, instruction: str) -> str:
-        """Caption using a Qwen2.5-VL model with frames extracted via cv2."""
+        """Caption using a Qwen2.5-VL model with native video input via qwen_vl_utils."""
         import torch
-        from PIL import Image
-        import numpy as np
+        from qwen_vl_utils import process_vision_info
 
-        # Extract frames with cv2 (avoids torchvision.io.read_video which is removed in 0.26+)
-        nframes = min(self.max_frames, 24)
-        raw_frames = extract_frames(video_path, self.fps, nframes)
-        if not raw_frames:
-            return "[VISUAL]: Unable to extract frames from video."
-
-        # Convert BGR numpy arrays to PIL RGB images
-        pil_frames = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in raw_frames]
-
-        # Build message with image list instead of video reference
-        content = []
-        for frame in pil_frames:
-            content.append({"type": "image", "image": frame})
-        content.append({"type": "text", "text": instruction})
-
-        messages = [{"role": "user", "content": content}]
+        messages = [
+            {"role": "user", "content": [
+                {
+                    "type": "video",
+                    "video": str(video_path),
+                    "max_pixels": 360 * 420,
+                    "nframes": min(self.max_frames, 24),
+                },
+                {"type": "text", "text": instruction},
+            ]},
+        ]
 
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        image_inputs, video_inputs = process_vision_info(messages)
         inputs = self.processor(
-            text=[text], images=pil_frames, videos=None,
+            text=[text], images=image_inputs, videos=video_inputs,
             return_tensors="pt", padding=True,
         ).to(self.model.device)
 

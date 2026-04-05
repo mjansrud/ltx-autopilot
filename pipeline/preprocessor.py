@@ -103,22 +103,35 @@ class SceneSplitter:
             log.warning("split_scenes.py not found at %s — skipping", script)
             return input_dir
 
-        cmd = [
-            "uv", "run", "python", str(script.resolve()),
-            "--input-dir", str(input_dir.resolve()),
-            "--output-dir", str(output_dir.resolve()),
-            "--filter-shorter-than", self.min_duration,
-        ]
+        import sys
+        videos = sorted(input_dir.glob("*.mp4"))
+        total_scenes = 0
 
-        log.info("Splitting scenes: %s -> %s", input_dir, output_dir)
-        result = subprocess.run(cmd, cwd=str(self.trainer_dir.resolve()),
-                                capture_output=True, text=True, errors="replace")
+        for video in videos:
+            cmd = [
+                sys.executable, str(script.resolve()),
+                str(video.resolve()),           # positional: VIDEO_PATH
+                str(output_dir.resolve()),       # positional: OUTPUT_DIR
+                "--detector", self.detector,
+                "--filter-shorter-than", self.min_duration,
+            ]
 
-        if result.returncode != 0:
-            err = (result.stderr or "")[-1000:]
-            log.warning("Scene splitting failed, falling back to unsplit videos:\n%s", err)
-            return input_dir
+            log.info("Splitting scenes: %s", video.name)
+            result = subprocess.run(cmd, cwd=str(self.trainer_dir.resolve()),
+                                    capture_output=True, text=True, errors="replace")
+
+            if result.returncode != 0:
+                err = (result.stderr or "")[-500:]
+                log.warning("  Scene split failed for %s: %s", video.name, err.strip())
+            else:
+                new_scenes = len(list(output_dir.glob("*.mp4"))) - total_scenes
+                total_scenes = len(list(output_dir.glob("*.mp4")))
+                log.info("  %s -> %d scene clips", video.name, max(new_scenes, 0))
 
         scenes = list(output_dir.glob("*.mp4"))
-        log.info("Split into %d scene clips", len(scenes))
+        if not scenes:
+            log.warning("No scenes produced, falling back to raw videos")
+            return input_dir
+
+        log.info("Split %d videos into %d scene clips", len(videos), len(scenes))
         return output_dir
