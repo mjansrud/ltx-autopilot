@@ -17,6 +17,7 @@ class Preprocessor:
         self.trainer_dir = Path(ltx_trainer_dir)
         self.resolution_buckets = config.get("resolution_buckets", ["576x576x49"])
         self.with_audio = config.get("with_audio", True)
+        self.lora_trigger = config.get("lora_trigger", None)
         self.model_path = training_config.get("model_checkpoint", "")
         self.text_encoder_path = training_config.get("text_encoder", "")
 
@@ -59,6 +60,9 @@ class Preprocessor:
         # Low VRAM optimizations for 32GB GPUs
         cmd.append("--vae-tiling")
         cmd.append("--load-text-encoder-in-8bit")
+
+        if self.lora_trigger:
+            cmd.extend(["--lora-trigger", self.lora_trigger])
 
         log.info("Running preprocessing: %s", " ".join(cmd))
 
