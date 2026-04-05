@@ -274,9 +274,10 @@ class TransformersCaptioner:
         inputs = inputs.to(self.model.device).to(self.model.dtype)
 
         with torch.inference_mode():
-            text_ids, _ = self.model.generate(
+            # Use thinker.generate directly to skip talker (avoids CUDA assert
+            # from uninitialized talker weights in thinker-only checkpoint)
+            text_ids = self.model.thinker.generate(
                 **inputs,
-                use_audio_in_video=use_audio,
                 do_sample=False,
                 max_new_tokens=self.max_new_tokens,
             )
