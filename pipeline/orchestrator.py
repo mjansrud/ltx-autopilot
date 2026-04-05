@@ -214,6 +214,35 @@ class PipelineOrchestrator:
             new_total = self.state.total_steps + steps
             dash.show_training_complete(checkpoint, new_total)
 
+        # ── Save I2V reference frames + captions for I2V eval ─────
+        i2v_refs = []
+        i2v_dir = Path("./evaluations/i2v_refs")
+        i2v_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            import cv2
+            # Load captions to pair frames with their descriptions
+            captions_by_path = {}
+            if metadata_file.exists():
+                for line in metadata_file.read_text(encoding="utf-8").splitlines():
+                    if line.strip():
+                        entry = json.loads(line)
+                        captions_by_path[Path(entry["media_path"]).name] = entry.get("caption", "")
+
+            clips = sorted(scenes_dir.glob("*.mp4")) if scenes_dir.exists() else []
+            for clip in clips[:2]:
+                cap = cv2.VideoCapture(str(clip))
+                ret, frame = cap.read()
+                cap.release()
+                if ret:
+                    img_path = i2v_dir / f"batch{batch:04d}_{clip.stem}.png"
+                    cv2.imwrite(str(img_path), frame)
+                    caption = captions_by_path.get(clip.name, "")
+                    if caption:
+                        i2v_refs.append({"image": str(img_path.resolve()), "prompt": caption})
+                        log.info("Saved I2V ref: %s", img_path.name)
+        except Exception as e:
+            log.debug("I2V ref frame save failed: %s", e)
+
         # ── 6. Evaluate (MODEL LOADED → UNLOADED) ─────────────────
         eval_cfg = self.cfg.get("evaluation", {})
         eval_every = eval_cfg.get("every_n_steps", 250)
@@ -237,6 +266,11 @@ class PipelineOrchestrator:
                 eval_dirs = sorted(self.evaluator.output_dir.glob(f"batch{batch:04d}_*"))
                 if eval_dirs:
                     dash.show_evaluation(eval_dirs[-1], eval_cfg.get("prompts", []))
+            # ── I2V eval: use saved frames + their captions ──────
+            if i2v_refs and checkpoint:
+                log.info("[6b/6] Running I2V evaluation with %d reference frames...", len(i2v_refs))
+                self._run_i2v_eval(i2v_refs, checkpoint, batch, new_total)
+
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
                      ((self.state.total_steps // eval_every) + 1) * eval_every if eval_every > 0 else 0)
@@ -249,6 +283,48 @@ class PipelineOrchestrator:
 
         dash.show_batch_summary(batch, self.state.total_steps, checkpoint, videos_count, captions_count)
         return True
+
+    def _run_i2v_eval(self, i2v_refs: list[dict], checkpoint: str, batch: int, total_steps: int):
+        """Run I2V inference using saved reference frames + their captions."""
+        import sys, os
+
+        script = Path(self.cfg["ltx_trainer_dir"]) / "scripts" / "inference.py"
+        if not script.exists():
+            log.warning("inference.py not found, skipping I2V eval")
+            return
+
+        eval_dir = Path("./evaluations") / f"i2v_batch{batch:04d}_step{total_steps:06d}"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+
+        model_path = self.cfg["training"]["model_checkpoint"]
+        text_encoder = self.cfg["training"]["text_encoder"]
+
+        env = os.environ.copy()
+        scripts_dir = str(script.parent.resolve())
+        env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+        for i, ref in enumerate(i2v_refs):
+            out_path = eval_dir / f"i2v_{i:02d}.mp4"
+            cmd = [
+                sys.executable, str(script.resolve()),
+                "--checkpoint", str(Path(model_path).resolve()),
+                "--text-encoder-path", str(Path(text_encoder).resolve()),
+                "--lora-path", str(Path(checkpoint).resolve()),
+                "--condition-image", ref["image"],
+                "--prompt", ref["prompt"],
+                "--output", str(out_path),
+                "--height", "576", "--width", "576",
+                "--num-frames", "49",
+                "--guidance-scale", "4.0",
+                "--num-inference-steps", "30",
+            ]
+
+            log.info("  I2V eval %d: %s -> %s", i, Path(ref["image"]).name, out_path.name)
+            result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=env)
+            if result.returncode != 0:
+                log.warning("  I2V eval failed: %s", (result.stderr or "")[-300:])
+            else:
+                log.info("  I2V eval %d complete: %s", i, out_path)
 
     def run(self, max_batches: int | None = None):
         """Run the continuous training loop."""
