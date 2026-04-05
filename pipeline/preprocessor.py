@@ -158,12 +158,17 @@ class SceneSplitter:
         if not scenes:
             return
 
-        # 3. Pick N evenly distributed scenes
+        # 3. Pick N evenly distributed scenes, skipping first/last (intro/outro)
         if self.max_scenes and len(scenes) > self.max_scenes:
-            n = len(scenes)
-            indices = [int(i * (n - 1) / (self.max_scenes - 1)) for i in range(self.max_scenes)]
-            scenes = [scenes[i] for i in indices]
-            log.info("  Picked %d evenly spaced clips", len(scenes))
+            # Drop first and last scene (usually intro/credits)
+            middle = scenes[1:-1] if len(scenes) > 2 else scenes
+            if len(middle) >= self.max_scenes:
+                n = len(middle)
+                indices = [int(i * (n - 1) / (self.max_scenes - 1)) for i in range(self.max_scenes)]
+                scenes = [middle[i] for i in indices]
+            else:
+                scenes = middle[:self.max_scenes]
+            log.info("  Picked %d clips from middle of video", len(scenes))
 
         # 4. Cut only the selected scenes with ffmpeg (fast copy, no re-encode)
         stem = video.stem
