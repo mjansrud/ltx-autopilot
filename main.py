@@ -54,8 +54,16 @@ def main():
 
     max_batches = 1 if args.batch_once else args.max_batches
 
-    orchestrator = PipelineOrchestrator(config_path)
-    orchestrator.run(max_batches=max_batches)
+    # Save PID for clean shutdown (stop.sh)
+    pid_file = Path("workspace/current/.pid")
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
+
+    try:
+        orchestrator = PipelineOrchestrator(config_path)
+        orchestrator.run(max_batches=max_batches)
+    finally:
+        pid_file.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

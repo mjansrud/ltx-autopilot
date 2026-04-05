@@ -154,14 +154,26 @@ class Trainer:
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-        result = subprocess.run(
-            cmd, cwd=str(self.trainer_dir.resolve()),
-            stdout=None, stderr=None,
-            env=env,
-        )
+        # Stream training output to log file + console for monitoring
+        train_log = self.output_dir / "training.log"
+        log.info("Training log: %s", train_log)
+        with open(train_log, "w", encoding="utf-8") as logf:
+            process = subprocess.Popen(
+                cmd, cwd=str(self.trainer_dir.resolve()),
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, errors="replace", bufsize=1,
+                env=env,
+            )
+            for line in process.stdout:
+                logf.write(line)
+                logf.flush()
+                line_stripped = line.strip()
+                if line_stripped:
+                    log.info("  [train] %s", line_stripped)
+            process.wait()
 
-        if result.returncode != 0:
-            raise RuntimeError(f"Training failed with exit code {result.returncode}")
+        if process.returncode != 0:
+            raise RuntimeError(f"Training failed with exit code {process.returncode}")
 
         checkpoint = self.find_latest_checkpoint()
         log.info("Training complete. Latest checkpoint: %s", checkpoint)
