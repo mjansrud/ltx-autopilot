@@ -175,12 +175,14 @@ class TransformersCaptioner:
                 else:
                     cls = AutoModelForCausalLM
 
-                # For Omni: use custom device map to keep thinker on GPU,
-                # offload talker/token2wav to CPU (not needed for captioning)
+                # For Omni: keep thinker on GPU, offload speech components to CPU
                 dmap = "auto"
                 if "Omni" in auto_cls_name:
                     dmap = {
-                        "thinker": "cuda:0",
+                        "thinker.model": "cuda:0",
+                        "thinker.lm_head": "cuda:0",
+                        "thinker.audio_tower": "cuda:0",
+                        "thinker.visual": "cuda:0",
                         "lm_head": "cuda:0",
                         "talker": "cpu",
                         "token2wav": "cpu",
