@@ -252,10 +252,10 @@ class TransformersCaptioner:
             return "[VISUAL]: Unable to extract frames from video."
         pil_frames = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in raw_frames]
 
-        # Build message with image placeholders
+        # Build message with image data inline
         content = []
-        for _ in pil_frames:
-            content.append({"type": "image"})
+        for frame in pil_frames:
+            content.append({"type": "image", "image": frame})
         content.append({"type": "text", "text": instruction})
 
         # Extract audio with ffmpeg as numpy array
@@ -273,8 +273,8 @@ class TransformersCaptioner:
                     sr, data = wavfile.read(tmp_path)
                     if data.dtype == np.int16:
                         data = data.astype(np.float32) / 32768.0
-                    audio_array = data.reshape(1, -1)  # [channels, samples]
-                    content.insert(0, {"type": "audio"})
+                    audio_array = data.flatten()  # 1D mono for Whisper feature extractor
+                    content.insert(0, {"type": "audio", "audio": audio_array})
                 import os
                 os.unlink(tmp_path)
             except Exception as e:
@@ -285,11 +285,9 @@ class TransformersCaptioner:
             {"role": "user", "content": content},
         ]
 
-        # Pass pre-loaded tensors directly (bypasses torchcodec file loading)
+        # Data is inline in messages — no separate images/audios kwargs needed
         inputs = self.processor.apply_chat_template(
             messages,
-            images=pil_frames,
-            audios=[audio_array] if audio_array is not None else None,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
