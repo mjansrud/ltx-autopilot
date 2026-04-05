@@ -13,10 +13,7 @@ lustpress/
 
 # Runtime data
 workspace/
-history/
-metadata_archive/
 state/
-evaluations/
 
 # Python
 __pycache__/

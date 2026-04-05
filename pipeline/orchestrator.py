@@ -34,7 +34,7 @@ class PipelineOrchestrator:
         self.config_path = Path(config_path)
         self.cfg = yaml.safe_load(self.config_path.read_text())
 
-        self.work_dir = Path("./workspace")
+        self.work_dir = Path("./workspace/current")
         self.state = PipelineState(self.cfg["state_file"])
 
         # Lustpress server
@@ -67,7 +67,7 @@ class PipelineOrchestrator:
 
     def _restore_from_cache(self, scenes_dir: Path, metadata_file: Path) -> list[Path] | None:
         """Try to restore scenes + captions from cache. Returns scene clips if found."""
-        cache_dir = Path("./history")
+        cache_dir = Path("./workspace/history")
         cache_scenes = cache_dir / "scenes"
         cache_captions = cache_dir / "captions.jsonl"
 
@@ -162,7 +162,7 @@ class PipelineOrchestrator:
             shutil.rmtree(precomputed, ignore_errors=True)
 
         # Keep raw/, scenes/, metadata.jsonl in cache for reuse
-        cache_dir = Path("./history")
+        cache_dir = Path("./workspace/history")
         cache_dir.mkdir(exist_ok=True)
         for subdir in ["raw", "scenes"]:
             src = self.work_dir / subdir
@@ -193,7 +193,7 @@ class PipelineOrchestrator:
 
     def _prune_history(self, max_gb: float):
         """Delete oldest clips from history when it exceeds max_gb."""
-        history = Path("./history")
+        history = Path("./workspace/history")
         if not history.exists():
             return
 
@@ -422,7 +422,7 @@ class PipelineOrchestrator:
             log.warning("inference.py not found, skipping I2V eval")
             return
 
-        eval_dir = Path("./evaluations") / f"i2v_batch{batch:04d}_step{total_steps:06d}"
+        eval_dir = Path("./workspace/evaluations") / f"i2v_batch{batch:04d}_step{total_steps:06d}"
         eval_dir.mkdir(parents=True, exist_ok=True)
 
         model_path = self.cfg["training"]["model_checkpoint"]
