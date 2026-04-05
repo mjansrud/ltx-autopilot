@@ -239,27 +239,50 @@ class TransformersCaptioner:
             return self._caption_vl(video_path, instruction)
 
     def _caption_omni(self, video_path: Path, instruction: str) -> str:
-        """Caption using Qwen2.5-Omni (native video+audio input)."""
+        """Caption using Qwen2.5-Omni (video+audio input, cv2+ffmpeg for Windows compat)."""
         import torch
+        import subprocess
+        import tempfile
+        from PIL import Image
+
+        # Extract frames with cv2 (bypass torchcodec)
+        raw_frames = extract_frames(video_path, self.fps, min(self.max_frames, 16))
+        if not raw_frames:
+            return "[VISUAL]: Unable to extract frames from video."
+        pil_frames = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in raw_frames]
+
+        # Build message content with images
+        content = [{"type": "text", "text": instruction}]
+        for frame in pil_frames:
+            content.append({"type": "image", "image": frame})
+
+        # Extract audio with ffmpeg if enabled
+        audio_path = None
+        if self.include_audio:
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+                audio_path = tmp.name
+                tmp.close()
+                cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
+                       "-ar", "16000", "-ac", "1", audio_path]
+                subprocess.run(cmd, capture_output=True, timeout=30)
+                content.append({"type": "audio", "audio": audio_path})
+            except Exception as e:
+                log.debug("Audio extraction failed for captioning: %s", e)
+                audio_path = None
 
         messages = [
             {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
-            {"role": "user", "content": [
-                {"type": "video", "video": str(video_path)},
-                {"type": "text", "text": instruction},
-            ]},
+            {"role": "user", "content": content},
         ]
 
         inputs = self.processor.apply_chat_template(
             messages,
-            load_audio_from_video=self.include_audio,
             add_generation_prompt=True,
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            fps=self.fps,
             padding=True,
-            use_audio_in_video=self.include_audio,
         ).to(self.model.device)
 
         input_len = inputs["input_ids"].shape[1]
@@ -271,6 +294,14 @@ class TransformersCaptioner:
                 do_sample=False,
                 max_new_tokens=self.max_new_tokens,
             )
+
+        # Clean up temp audio
+        if audio_path:
+            try:
+                import os
+                os.unlink(audio_path)
+            except Exception:
+                pass
 
         caption = self.processor.batch_decode(
             output[:, input_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False
