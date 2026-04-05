@@ -249,76 +249,39 @@ class TransformersCaptioner:
             return self._caption_vl(video_path, instruction)
 
     def _caption_omni(self, video_path: Path, instruction: str) -> str:
-        """Caption using Qwen2.5-Omni (pass pre-loaded tensors, no torchcodec needed)."""
+        """Caption using Qwen2.5-Omni via official qwen_omni_utils."""
         import torch
-        import subprocess
-        import tempfile
-        import numpy as np
-        from PIL import Image
+        from qwen_omni_utils import process_mm_info
 
-        # Extract frames with cv2
-        raw_frames = extract_frames(video_path, self.fps, min(self.max_frames, 16))
-        if not raw_frames:
-            return "[VISUAL]: Unable to extract frames from video."
-        pil_frames = [Image.fromarray(cv2.cvtColor(f, cv2.COLOR_BGR2RGB)) for f in raw_frames]
+        use_audio = self.include_audio
 
-        # Build message with image data inline
-        content = []
-        for frame in pil_frames:
-            content.append({"type": "image", "image": frame})
-        content.append({"type": "text", "text": instruction})
-
-        # Extract audio with ffmpeg as numpy array
-        audio_array = None
-        if self.include_audio:
-            try:
-                tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-                tmp_path = tmp.name
-                tmp.close()
-                cmd = ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-acodec", "pcm_s16le",
-                       "-ar", "16000", "-ac", "1", tmp_path]
-                result = subprocess.run(cmd, capture_output=True, timeout=30)
-                if result.returncode == 0:
-                    from scipy.io import wavfile
-                    sr, data = wavfile.read(tmp_path)
-                    if data.dtype == np.int16:
-                        data = data.astype(np.float32) / 32768.0
-                    audio_array = data.flatten()  # 1D mono for Whisper feature extractor
-                    content.insert(0, {"type": "audio", "audio": audio_array})
-                import os
-                os.unlink(tmp_path)
-            except Exception as e:
-                log.debug("Audio extraction failed for captioning: %s", e)
-
-        messages = [
+        conversation = [
             {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
-            {"role": "user", "content": content},
+            {"role": "user", "content": [
+                {"type": "video", "video": str(video_path)},
+                {"type": "text", "text": instruction},
+            ]},
         ]
 
-        # Data is inline in messages — no separate images/audios kwargs needed
-        inputs = self.processor.apply_chat_template(
-            messages,
-            add_generation_prompt=True,
-            tokenize=True,
-            return_dict=True,
-            return_tensors="pt",
-            padding=True,
-        ).to(self.model.device)
+        # process_mm_info handles video/audio extraction (uses decord/librosa internally)
+        text = self.processor.apply_chat_template(conversation, add_generation_prompt=True, tokenize=False)
+        audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio)
 
-        input_len = inputs["input_ids"].shape[1]
+        inputs = self.processor(
+            text=text, audio=audios, images=images, videos=videos,
+            return_tensors="pt", padding=True,
+        )
+        inputs = inputs.to(self.model.device).to(self.model.dtype)
 
         with torch.inference_mode():
-            output = self.model.generate(
+            text_ids, _ = self.model.generate(
                 **inputs,
-                use_audio_in_video=self.include_audio,
+                use_audio_in_video=use_audio,
                 do_sample=False,
                 max_new_tokens=self.max_new_tokens,
             )
 
-        caption = self.processor.batch_decode(
-            output[:, input_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False
-        )[0]
-
+        caption = self.processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         return clean_caption(caption)
 
     def _caption_vl(self, video_path: Path, instruction: str) -> str:
