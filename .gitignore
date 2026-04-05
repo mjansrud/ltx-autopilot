@@ -29,3 +29,4 @@ Thumbs.db
 
 # Config with local paths
 config.yaml
+workspace_next/

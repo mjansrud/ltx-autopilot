@@ -65,7 +65,7 @@ class Trainer:
                 "max_grad_norm": self.cfg.get("max_grad_norm", 1.0),
                 "optimizer_type": self.cfg.get("optimizer", "adamw"),
                 "scheduler_type": self.cfg.get("lr_scheduler", "cosine"),
-                "scheduler_params": {"num_warmup_steps": self.cfg.get("warmup_steps", 100)},
+                "scheduler_params": {},
                 "enable_gradient_checkpointing": self.cfg.get("gradient_checkpointing", True),
             },
             "acceleration": {

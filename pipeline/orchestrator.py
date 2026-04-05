@@ -85,7 +85,7 @@ class PipelineOrchestrator:
 
     def _start_prefetch(self, batch_num: int):
         """Start prefetching next batch in background thread."""
-        next_work = Path(f"./workspace_next")
+        next_work = Path(f"./workspace/prefetch")
         if next_work.exists():
             shutil.rmtree(next_work, ignore_errors=True)
         self._prefetch_future = self._prefetch_executor.submit(self._prefetch_batch, batch_num, next_work)
@@ -147,7 +147,7 @@ class PipelineOrchestrator:
         if prefetched and prefetched[0]:
             videos, scene_videos = prefetched
             # Move prefetched data into current workspace
-            next_work = Path("./workspace_next")
+            next_work = Path("./workspace/prefetch")
             if (next_work / "raw").exists():
                 shutil.copytree(next_work / "raw", raw_dir, dirs_exist_ok=True)
             if (next_work / "scenes").exists():
