@@ -185,7 +185,37 @@ class PipelineOrchestrator:
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
+        # Prune history if it exceeds max size
+        max_gb = cleanup_cfg.get("max_history_gb", 20)
+        self._prune_history(max_gb)
+
         dash.show_cleanup(False)
+
+    def _prune_history(self, max_gb: float):
+        """Delete oldest clips from history when it exceeds max_gb."""
+        history = Path("./history")
+        if not history.exists():
+            return
+
+        # Calculate total size
+        all_files = sorted(history.rglob("*"), key=lambda f: f.stat().st_mtime if f.is_file() else 0)
+        total = sum(f.stat().st_size for f in all_files if f.is_file())
+        max_bytes = max_gb * 1024 ** 3
+
+        if total <= max_bytes:
+            return
+
+        # Delete oldest files first (mp4s are the big ones)
+        deleted = 0
+        for f in all_files:
+            if not f.is_file() or total <= max_bytes:
+                break
+            size = f.stat().st_size
+            f.unlink()
+            total -= size
+            deleted += 1
+
+        log.info("[PRUNE] Deleted %d old files from history (now %.1f GB)", deleted, total / 1024**3)
 
     def run_batch(self) -> bool:
         """
