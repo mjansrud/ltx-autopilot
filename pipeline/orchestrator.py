@@ -109,19 +109,10 @@ class PipelineOrchestrator:
         if not cleanup_cfg.get("delete_after_training", True):
             return
 
-        keep_metadata = cleanup_cfg.get("keep_metadata", True)
-
-        if keep_metadata:
-            metadata_dir = Path("./metadata_archive")
-            metadata_dir.mkdir(exist_ok=True)
-            for jsonl in self.work_dir.glob("**/*.jsonl"):
-                dest = metadata_dir / f"batch{self.state.batch_num:04d}_{jsonl.name}"
-                shutil.copy2(jsonl, dest)
-
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
-        dash.show_cleanup(keep_metadata)
+        dash.show_cleanup(False)
 
     def run_batch(self) -> bool:
         """
