@@ -214,6 +214,10 @@ class PipelineOrchestrator:
             new_total = self.state.total_steps + steps
             dash.show_training_complete(checkpoint, new_total)
 
+        # ── Save state immediately after training (before eval) ───
+        steps_this_batch = self.cfg["training"]["steps_per_batch"]
+        self.state.advance_batch(steps_this_batch, checkpoint)
+
         # ── Save I2V reference frames for NEXT batch's eval ────────
         # (using current batch's frames for next batch = unseen data)
         i2v_dir = Path("./evaluations/i2v_refs")
@@ -259,11 +263,11 @@ class PipelineOrchestrator:
         # ── 6. Evaluate (MODEL LOADED → UNLOADED) ─────────────────
         eval_cfg = self.cfg.get("evaluation", {})
         eval_every = eval_cfg.get("every_n_steps", 250)
-        steps_this_batch = self.cfg["training"]["steps_per_batch"]
-        new_total = self.state.total_steps + steps_this_batch
+        # new_total already computed above; state already advanced
+        prev_total = new_total - self.cfg["training"]["steps_per_batch"]
 
         should_eval = (eval_every > 0) and (
-            new_total // eval_every > self.state.total_steps // eval_every
+            new_total // eval_every > prev_total // eval_every
         )
 
         if should_eval and checkpoint:
@@ -298,10 +302,9 @@ class PipelineOrchestrator:
         except Exception:
             pass
 
-        # ── Update state & cleanup ─────────────────────────────────
+        # ── Cleanup ────────────────────────────────────────────────
         videos_count = len(videos)
         captions_count = sum(1 for _ in open(metadata_file)) if metadata_file.exists() else 0
-        self.state.advance_batch(steps_this_batch, checkpoint)
         self._cleanup()
 
         dash.show_batch_summary(batch, self.state.total_steps, checkpoint, videos_count, captions_count)
