@@ -272,6 +272,7 @@ class TransformersCaptioner:
             return_tensors="pt", padding=True,
         )
         inputs = inputs.to(self.model.device).to(self.model.dtype)
+        input_len = inputs["input_ids"].shape[1]
 
         with torch.inference_mode():
             # Use thinker.generate directly to skip talker (avoids CUDA assert
@@ -282,7 +283,8 @@ class TransformersCaptioner:
                 max_new_tokens=self.max_new_tokens,
             )
 
-        caption = self.processor.batch_decode(text_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        # Slice to only new tokens (skip input)
+        caption = self.processor.batch_decode(text_ids[:, input_len:], skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
         return clean_caption(caption)
 
     def _caption_vl(self, video_path: Path, instruction: str) -> str:
