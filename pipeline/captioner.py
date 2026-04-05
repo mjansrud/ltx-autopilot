@@ -182,10 +182,9 @@ class TransformersCaptioner:
                     device_map="auto",
                     trust_remote_code=True,
                 )
-                # For Omni: cap GPU to 20GB, spill talker/token2wav to CPU
+                # For Omni: cap GPU usage, overflow to CPU
                 if "Omni" in auto_cls_name:
-                    load_kwargs["max_memory"] = {0: "20GiB", "cpu": "40GiB"}
-                    load_kwargs.pop("quantization_config")  # 8bit doesn't work with Omni
+                    load_kwargs["max_memory"] = {0: "28GiB", "cpu": "40GiB"}
 
                 self.model = cls.from_pretrained(self.model_id, **load_kwargs)
                 model_loaded = True
