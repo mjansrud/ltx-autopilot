@@ -79,6 +79,10 @@ class Preprocessor:
             env=env,
         )
 
+        # Always log output for debugging
+        if result.stdout:
+            for line in result.stdout.strip().split("\n")[-30:]:
+                log.info("  [preprocess] %s", line.strip())
         if result.returncode != 0:
             err = (result.stderr or "no stderr")[-2000:]
             log.error("Preprocessing failed:\n%s", err)

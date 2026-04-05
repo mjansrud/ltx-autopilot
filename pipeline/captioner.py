@@ -41,7 +41,9 @@ body parts involved), body types (build, skin tone, hair color/style, distinguis
 physical movement (rhythm, speed, intensity, thrusting patterns), facial expressions during \
 sex (pleasure, orgasm, eye contact), body contact and fluid exchange. ALSO INCLUDE: camera \
 angle relative to the action (POV, side angle, overhead, close-up of genitals), lighting, \
-environment, and temporal progression from start to climax. Be frame-by-frame specific.>
+environment, and temporal progression from start to climax. IMPORTANT: describe any camera \
+switches, angle changes, or cuts in order (e.g. "The camera switches from a wide shot to a \
+close-up of...", "Cut to a POV angle showing..."). Be frame-by-frame specific.>
 [SPEECH]: <All spoken words, dirty talk, moaning, gasping, screaming, grunting — transcribe \
 exactly with intensity level (soft moan, loud scream, whispered words). Note who speaks. \
 If none, write "None.">
@@ -65,7 +67,9 @@ body parts involved), body types (build, skin tone, hair color/style, distinguis
 physical movement (rhythm, speed, intensity, thrusting patterns), facial expressions during \
 sex (pleasure, orgasm, eye contact), body contact and fluid exchange. ALSO INCLUDE: camera \
 angle relative to the action (POV, side angle, overhead, close-up of genitals), lighting, \
-environment, and temporal progression from start to climax. Be frame-by-frame specific.>
+environment, and temporal progression from start to climax. IMPORTANT: describe any camera \
+switches, angle changes, or cuts in order (e.g. "The camera switches from a wide shot to a \
+close-up of...", "Cut to a POV angle showing..."). Be frame-by-frame specific.>
 [TEXT]: <Watermarks, titles, on-screen text. If none, write "None.">\
 """
 
