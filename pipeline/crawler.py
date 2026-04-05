@@ -264,48 +264,59 @@ class VideoCrawler:
         log.info("Collected %d candidate video URLs", len(candidates))
         return candidates
 
-    def _download_videos(self, candidates: list[dict], output_dir: Path) -> list[Path]:
-        """Download videos using yt-dlp from the collected URLs."""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        downloaded = []
+    def _download_one(self, item: dict, output_dir: Path) -> Path | None:
+        """Download a single video. Returns path if successful, None otherwise."""
+        url = item["url"]
+        output_template = str(output_dir / f"{item['source']}_%(id)s.%(ext)s")
 
-        for item in candidates:
-            url = item["url"]
-            # Use yt-dlp's own ID to avoid filename issues
-            output_template = str(output_dir / f"{item['source']}_%(id)s.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            url,
+            "-f", f"bestvideo[height<={self.max_res}][ext=mp4]+bestaudio[ext=m4a]/best[height<={self.max_res}][ext=mp4]/best[height<={self.max_res}]/best",
+            "--merge-output-format", "mp4",
+            "-o", output_template,
+            "--no-playlist",
+            "--no-overwrites",
+            "--retries", "3",
+            "--socket-timeout", "30",
+            "--max-filesize", "100m",
+            "--match-filter", f"duration>={self.min_dur} & duration<={self.max_dur}",
+        ]
 
-            cmd = [
-                "yt-dlp",
-                url,
-                "-f", f"bestvideo[height<={self.max_res}][ext=mp4]+bestaudio[ext=m4a]/best[height<={self.max_res}][ext=mp4]/best[height<={self.max_res}]/best",
-                "--merge-output-format", "mp4",
-                "-o", output_template,
-                "--no-playlist",
-                "--no-overwrites",
-                "--retries", "3",
-                "--socket-timeout", "30",
-                "--max-filesize", "100m",
-                "--match-filter", f"duration>={self.min_dur} & duration<={self.max_dur}",
-            ]
+        log.info("  Downloading: %s [%s]", item["title"][:60], item["source"])
 
-            log.info("  Downloading: %s [%s]", item["title"][:60], item["source"])
-
-            existing_before = set(output_dir.glob("*.mp4"))
+        existing_before = set(output_dir.glob("*.mp4"))
+        try:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300,
                                     errors="replace")
-
             if result.returncode == 0:
-                # Find newly created file
                 new_files = set(output_dir.glob("*.mp4")) - existing_before
                 if new_files:
                     new_file = next(iter(new_files))
-                    downloaded.append(new_file)
                     log.info("    OK: %s", new_file.name)
+                    return new_file
             else:
                 log.warning("    Failed: %s", (result.stderr or "")[-200:].strip())
-
-            # Mark as seen regardless of success (don't retry broken URLs)
+        except subprocess.TimeoutExpired:
+            log.warning("    Timeout: %s", item["title"][:60])
+        finally:
             self._mark_seen(url)
+
+        return None
+
+    def _download_videos(self, candidates: list[dict], output_dir: Path) -> list[Path]:
+        """Download videos in parallel using yt-dlp."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        output_dir.mkdir(parents=True, exist_ok=True)
+        downloaded = []
+
+        with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+            futures = {pool.submit(self._download_one, item, output_dir): item for item in candidates}
+            for future in as_completed(futures):
+                result = future.result()
+                if result is not None:
+                    downloaded.append(result)
 
         return downloaded
 

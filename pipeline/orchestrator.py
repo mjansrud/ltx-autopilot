@@ -12,6 +12,7 @@ import json
 import logging
 import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
 
 import yaml
@@ -58,8 +59,48 @@ class PipelineOrchestrator:
             self.cfg["ltx_trainer_dir"],
         )
 
+        self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
+        self._prefetch_future: Future | None = None
+
     def _ensure_work_dir(self):
         self.work_dir.mkdir(parents=True, exist_ok=True)
+
+    def _prefetch_batch(self, batch_num: int, work_dir: Path) -> tuple[list[Path], list[Path]]:
+        """Download + scene-split for a future batch (CPU only, no GPU)."""
+        raw_dir = work_dir / "raw"
+        scenes_dir = work_dir / "scenes"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+
+        videos = self.crawler.crawl(batch_num, raw_dir)
+        if not videos:
+            return [], []
+
+        split_dir = self.scene_splitter.split(raw_dir, scenes_dir)
+        scene_videos = sorted(split_dir.glob("*.mp4"))
+        if not scene_videos:
+            scene_videos = videos
+
+        log.info("[PREFETCH] Batch %d ready: %d videos, %d scenes", batch_num, len(videos), len(scene_videos))
+        return videos, scene_videos
+
+    def _start_prefetch(self, batch_num: int):
+        """Start prefetching next batch in background thread."""
+        next_work = Path(f"./workspace_next")
+        if next_work.exists():
+            shutil.rmtree(next_work, ignore_errors=True)
+        self._prefetch_future = self._prefetch_executor.submit(self._prefetch_batch, batch_num, next_work)
+
+    def _collect_prefetch(self) -> tuple[list[Path], list[Path]] | None:
+        """Collect prefetched data if available."""
+        if self._prefetch_future is None:
+            return None
+        try:
+            result = self._prefetch_future.result(timeout=0)
+            self._prefetch_future = None
+            return result
+        except Exception:
+            self._prefetch_future = None
+            return None
 
     def _cleanup(self):
         """Remove temporary batch data, keep checkpoints and evaluations."""
@@ -88,9 +129,11 @@ class PipelineOrchestrator:
 
         Memory lifecycle:
           1. Crawl + Split       — no GPU needed (Lustpress + yt-dlp + ffmpeg)
+                                   (prefetched in background during previous batch's training)
           2. Caption             — captioner model LOADED then UNLOADED
           3. Preprocess          — uses LTX VAE/encoder (subprocess, separate process memory)
           4. Train               — training occupies GPU (subprocess)
+                                   (prefetch NEXT batch starts here in background)
           5. Evaluate            — inference pipeline loaded then unloaded (subprocess)
           6. Cleanup             — free disk
         """
@@ -108,23 +151,37 @@ class PipelineOrchestrator:
         dash.show_batch_header(batch, self.state.total_steps, query, sources)
         dash.show_vram_status("batch start", get_vram_usage())
 
-        # ── 1. Crawl ───────────────────────────────────────────────
-        with vram_stage("crawl", False):
-            log.info("[1/6] Crawling videos via Lustpress...")
-            videos = self.crawler.crawl(batch, raw_dir)
-            if not videos:
-                log.warning("No videos downloaded. Waiting before retry...")
-                return False
-            log.info("Downloaded %d videos", len(videos))
+        # ── 1+2. Crawl + Split (use prefetch if available) ────────
+        prefetched = self._collect_prefetch()
+        if prefetched and prefetched[0]:
+            videos, scene_videos = prefetched
+            # Move prefetched data into current workspace
+            next_work = Path("./workspace_next")
+            if (next_work / "raw").exists():
+                shutil.copytree(next_work / "raw", raw_dir, dirs_exist_ok=True)
+            if (next_work / "scenes").exists():
+                shutil.copytree(next_work / "scenes", scenes_dir, dirs_exist_ok=True)
+            shutil.rmtree(next_work, ignore_errors=True)
+            # Update paths to point to current workspace
+            scene_videos = sorted(scenes_dir.glob("*.mp4")) if scenes_dir.exists() else sorted(raw_dir.glob("*.mp4"))
+            log.info("[1-2/6] Using prefetched data: %d videos, %d scenes", len(videos), len(scene_videos))
+            dash.show_scene_split(len(videos), len(scene_videos), scenes_dir if scenes_dir.exists() else raw_dir)
+        else:
+            with vram_stage("crawl", False):
+                log.info("[1/6] Crawling videos via Lustpress...")
+                videos = self.crawler.crawl(batch, raw_dir)
+                if not videos:
+                    log.warning("No videos downloaded. Waiting before retry...")
+                    return False
+                log.info("Downloaded %d videos", len(videos))
 
-        # ── 2. Split scenes ────────────────────────────────────────
-        with vram_stage("scene_split", False):
-            log.info("[2/6] Splitting %d videos into scenes...", len(videos))
-            split_dir = self.scene_splitter.split(raw_dir, scenes_dir)
-            scene_videos = sorted(split_dir.glob("*.mp4"))
-            if not scene_videos:
-                scene_videos = videos
-            dash.show_scene_split(len(videos), len(scene_videos), split_dir)
+            with vram_stage("scene_split", False):
+                log.info("[2/6] Splitting %d videos into scenes...", len(videos))
+                split_dir = self.scene_splitter.split(raw_dir, scenes_dir)
+                scene_videos = sorted(split_dir.glob("*.mp4"))
+                if not scene_videos:
+                    scene_videos = videos
+                dash.show_scene_split(len(videos), len(scene_videos), split_dir)
 
         # ── 3. Caption (MODEL LOADED → UNLOADED) ──────────────────
         with vram_stage("captioning"):
@@ -150,6 +207,11 @@ class PipelineOrchestrator:
             dash.show_preprocessing(precomputed_dir)
 
         # ── 5. Train (runs as subprocess, GPU occupied) ────────────
+        # Start prefetching next batch while GPU is busy training
+        next_batch = self.state.batch_num + 1
+        log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
+        self._start_prefetch(next_batch)
+
         with vram_stage("training"):
             steps = self.cfg["training"]["steps_per_batch"]
             resume_from = self.state.last_checkpoint

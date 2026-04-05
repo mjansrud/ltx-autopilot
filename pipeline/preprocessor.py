@@ -88,7 +88,13 @@ class SceneSplitter:
         self.trainer_dir = Path(ltx_trainer_dir)
         self.enabled = config.get("enabled", True)
         self.min_duration = config.get("min_scene_duration", "3s")
+        self.max_scenes = config.get("max_scenes_per_video", None)
         self.detector = config.get("detector", "content")
+
+    def _parse_min_duration(self) -> float:
+        """Parse min_duration string like '8s' to seconds."""
+        s = self.min_duration.strip().rstrip("s")
+        return float(s)
 
     def split(self, input_dir: Path, output_dir: Path) -> Path:
         """Split videos into scenes. Returns directory of split clips."""
@@ -96,37 +102,19 @@ class SceneSplitter:
             log.info("Scene splitting disabled, using raw videos")
             return input_dir
 
+        from concurrent.futures import ThreadPoolExecutor
+
         output_dir.mkdir(parents=True, exist_ok=True)
-
-        script = self.trainer_dir / "scripts" / "split_scenes.py"
-        if not script.exists():
-            log.warning("split_scenes.py not found at %s — skipping", script)
-            return input_dir
-
-        import sys
         videos = sorted(input_dir.glob("*.mp4"))
-        total_scenes = 0
+        min_dur = self._parse_min_duration()
 
-        for video in videos:
-            cmd = [
-                sys.executable, str(script.resolve()),
-                str(video.resolve()),           # positional: VIDEO_PATH
-                str(output_dir.resolve()),       # positional: OUTPUT_DIR
-                "--detector", self.detector,
-                "--filter-shorter-than", self.min_duration,
-            ]
-
-            log.info("Splitting scenes: %s", video.name)
-            result = subprocess.run(cmd, cwd=str(self.trainer_dir.resolve()),
-                                    capture_output=True, text=True, errors="replace")
-
-            if result.returncode != 0:
-                err = (result.stderr or "")[-500:]
-                log.warning("  Scene split failed for %s: %s", video.name, err.strip())
-            else:
-                new_scenes = len(list(output_dir.glob("*.mp4"))) - total_scenes
-                total_scenes = len(list(output_dir.glob("*.mp4")))
-                log.info("  %s -> %d scene clips", video.name, max(new_scenes, 0))
+        with ThreadPoolExecutor(max_workers=len(videos) or 1) as pool:
+            futures = {pool.submit(self._split_video, v, output_dir, min_dur): v for v in videos}
+            for future in futures:
+                try:
+                    future.result()
+                except Exception as e:
+                    log.warning("  Scene split failed for %s: %s", futures[future].name, e)
 
         scenes = list(output_dir.glob("*.mp4"))
         if not scenes:
@@ -135,3 +123,50 @@ class SceneSplitter:
 
         log.info("Split %d videos into %d scene clips", len(videos), len(scenes))
         return output_dir
+
+    def _split_video(self, video: Path, output_dir: Path, min_dur: float):
+        """Detect scenes, pick evenly spaced ones, cut only those with ffmpeg."""
+        from scenedetect import open_video, SceneManager, ContentDetector, AdaptiveDetector
+
+        log.info("Splitting scenes: %s", video.name)
+
+        # 1. Detect scene boundaries (fast — just reads frames, no encoding)
+        sv = open_video(str(video))
+        sm = SceneManager()
+        if self.detector == "adaptive":
+            sm.add_detector(AdaptiveDetector())
+        else:
+            sm.add_detector(ContentDetector())
+        sm.detect_scenes(sv)
+        all_scenes = sm.get_scene_list()
+
+        # 2. Filter by minimum duration
+        scenes = [(s, e) for s, e in all_scenes if (e - s).get_seconds() >= min_dur]
+        log.info("  %s: %d scenes detected, %d >= %ss", video.name, len(all_scenes), len(scenes), min_dur)
+
+        if not scenes:
+            return
+
+        # 3. Pick N evenly distributed scenes
+        if self.max_scenes and len(scenes) > self.max_scenes:
+            n = len(scenes)
+            indices = [int(i * (n - 1) / (self.max_scenes - 1)) for i in range(self.max_scenes)]
+            scenes = [scenes[i] for i in indices]
+            log.info("  Picked %d evenly spaced clips", len(scenes))
+
+        # 4. Cut only the selected scenes with ffmpeg (fast copy, no re-encode)
+        stem = video.stem
+        for i, (start, end) in enumerate(scenes):
+            out_path = output_dir / f"{stem}-Scene-{i+1:03d}.mp4"
+            ss = start.get_seconds()
+            dur = (end - start).get_seconds()
+            cmd = [
+                "ffmpeg", "-y", "-ss", f"{ss:.3f}", "-i", str(video),
+                "-t", f"{dur:.3f}", "-c", "copy", "-avoid_negative_ts", "1",
+                str(out_path),
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+            if result.returncode != 0:
+                log.warning("  ffmpeg failed for scene %d: %s", i+1, (result.stderr or "")[-200:])
+
+        log.info("  %s -> %d clips cut", video.name, len(scenes))
