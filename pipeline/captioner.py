@@ -315,12 +315,18 @@ class TransformersCaptioner:
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
         results = []
+        # Store paths relative to metadata file so process_dataset.py resolves correctly
+        metadata_dir = output_file.parent.resolve()
 
         for i, vpath in enumerate(video_paths):
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
             try:
                 caption = self.caption_video(vpath)
-                results.append({"media_path": str(vpath), "caption": caption})
+                try:
+                    rel_path = str(vpath.resolve().relative_to(metadata_dir))
+                except ValueError:
+                    rel_path = str(vpath.resolve())
+                results.append({"media_path": rel_path, "caption": caption})
                 log.info("  Caption preview: %.120s...", caption)
             except Exception as e:
                 log.error("  Failed to caption %s: %s", vpath.name, e)
@@ -394,12 +400,17 @@ class OpenAICompatCaptioner:
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
         results = []
+        metadata_dir = output_file.parent.resolve()
 
         for i, vpath in enumerate(video_paths):
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
             try:
                 caption = self.caption_video(vpath)
-                results.append({"media_path": str(vpath), "caption": caption})
+                try:
+                    rel_path = str(vpath.resolve().relative_to(metadata_dir))
+                except ValueError:
+                    rel_path = str(vpath.resolve())
+                results.append({"media_path": rel_path, "caption": caption})
             except Exception as e:
                 log.error("  Failed to caption %s: %s", vpath.name, e)
                 continue
