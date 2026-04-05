@@ -214,13 +214,13 @@ class PipelineOrchestrator:
             new_total = self.state.total_steps + steps
             dash.show_training_complete(checkpoint, new_total)
 
-        # ── Save I2V reference frames + captions for I2V eval ─────
-        i2v_refs = []
+        # ── Save I2V reference frames for NEXT batch's eval ────────
+        # (using current batch's frames for next batch = unseen data)
         i2v_dir = Path("./evaluations/i2v_refs")
         i2v_dir.mkdir(parents=True, exist_ok=True)
+        next_refs_file = i2v_dir / "pending_refs.json"
         try:
             import cv2
-            # Load captions to pair frames with their descriptions
             captions_by_path = {}
             if metadata_file.exists():
                 for line in metadata_file.read_text(encoding="utf-8").splitlines():
@@ -229,6 +229,7 @@ class PipelineOrchestrator:
                         captions_by_path[Path(entry["media_path"]).name] = entry.get("caption", "")
 
             clips = sorted(scenes_dir.glob("*.mp4")) if scenes_dir.exists() else []
+            pending = []
             for clip in clips[:2]:
                 cap = cv2.VideoCapture(str(clip))
                 ret, frame = cap.read()
@@ -238,10 +239,22 @@ class PipelineOrchestrator:
                     cv2.imwrite(str(img_path), frame)
                     caption = captions_by_path.get(clip.name, "")
                     if caption:
-                        i2v_refs.append({"image": str(img_path.resolve()), "prompt": caption})
-                        log.info("Saved I2V ref: %s", img_path.name)
+                        pending.append({"image": str(img_path.resolve()), "prompt": caption})
+            # Save for next batch to pick up
+            next_refs_file.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
+            log.info("Saved %d I2V refs for next batch's eval", len(pending))
         except Exception as e:
             log.debug("I2V ref frame save failed: %s", e)
+
+        # ── Load I2V refs from PREVIOUS batch (unseen frames) ─────
+        i2v_refs = []
+        try:
+            prev_refs_file = i2v_dir / "prev_refs.json"
+            if prev_refs_file.exists():
+                i2v_refs = json.loads(prev_refs_file.read_text(encoding="utf-8"))
+                log.info("Loaded %d I2V refs from previous batch", len(i2v_refs))
+        except Exception:
+            pass
 
         # ── 6. Evaluate (MODEL LOADED → UNLOADED) ─────────────────
         eval_cfg = self.cfg.get("evaluation", {})
@@ -266,14 +279,24 @@ class PipelineOrchestrator:
                 eval_dirs = sorted(self.evaluator.output_dir.glob(f"batch{batch:04d}_*"))
                 if eval_dirs:
                     dash.show_evaluation(eval_dirs[-1], eval_cfg.get("prompts", []))
-            # ── I2V eval: use saved frames + their captions ──────
+            # ── I2V eval: use frames from previous batch (unseen) ──
             if i2v_refs and checkpoint:
-                log.info("[6b/6] Running I2V evaluation with %d reference frames...", len(i2v_refs))
+                log.info("[6b/6] Running I2V evaluation with %d unseen reference frames...", len(i2v_refs))
                 self._run_i2v_eval(i2v_refs, checkpoint, batch, new_total)
 
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
                      ((self.state.total_steps // eval_every) + 1) * eval_every if eval_every > 0 else 0)
+
+        # Rotate I2V refs: pending -> prev for next batch
+        try:
+            pending = i2v_dir / "pending_refs.json"
+            prev = i2v_dir / "prev_refs.json"
+            if pending.exists():
+                shutil.copy2(pending, prev)
+                pending.unlink()
+        except Exception:
+            pass
 
         # ── Update state & cleanup ─────────────────────────────────
         videos_count = len(videos)
