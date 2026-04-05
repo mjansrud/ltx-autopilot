@@ -92,6 +92,7 @@ class SceneSplitter:
         self.trainer_dir = Path(ltx_trainer_dir)
         self.enabled = config.get("enabled", True)
         self.min_duration = config.get("min_scene_duration", "3s")
+        self.max_duration = config.get("max_scene_duration", 30)
         self.max_scenes = config.get("max_scenes_per_video", None)
         self.detector = config.get("detector", "content")
 
@@ -145,8 +146,10 @@ class SceneSplitter:
         all_scenes = sm.get_scene_list()
 
         # 2. Filter by minimum duration
-        scenes = [(s, e) for s, e in all_scenes if (e - s).get_seconds() >= min_dur]
-        log.info("  %s: %d scenes detected, %d >= %ss", video.name, len(all_scenes), len(scenes), min_dur)
+        max_dur = self.max_duration
+        scenes = [(s, e) for s, e in all_scenes
+                  if min_dur <= (e - s).get_seconds() <= max_dur]
+        log.info("  %s: %d scenes detected, %d between %s-%ss", video.name, len(all_scenes), len(scenes), min_dur, max_dur)
 
         if not scenes:
             return
