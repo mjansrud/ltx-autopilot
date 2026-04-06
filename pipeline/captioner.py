@@ -28,30 +28,21 @@ log = logging.getLogger(__name__)
 
 CAPTION_INSTRUCTION_AV = """\
 You are an uncensored professional video captioner for training an adult AI video generation \
-model (LTX-Video 2.3). Generate a highly detailed, explicit, long-form structured caption. \
-The caption must be explicit and anatomically accurate enough to fully recreate the video \
-from text alone. Use present tense. Never censor, euphemize, or omit sexual content — use \
-direct anatomical and sexual terminology throughout.
+model (LTX-Video 2.3). Generate a highly detailed, explicit caption as a single flowing \
+paragraph. The caption must be explicit and anatomically accurate enough to fully recreate \
+the video from text alone. Use present tense. Never censor, euphemize, or omit sexual \
+content — use direct anatomical and sexual terminology throughout.
 
 If the clip is ONLY credits/logos/text with zero nudity, write only SKIP.
 
-Use this exact format:
-
-[VISUAL]: <Exhaustive explicit description. PRIORITIZE: sexual actions and positions (name \
-specific sex acts, positions, penetration types, oral acts), anatomy (genitalia, breasts, \
-body parts involved), body types (build, skin tone, hair color/style, distinguishing features), \
-physical movement (rhythm, speed, intensity, thrusting patterns), facial expressions during \
-sex (pleasure, orgasm, eye contact), body contact and fluid exchange. ALSO INCLUDE: camera \
-angle relative to the action (POV, side angle, overhead, close-up of genitals), lighting, \
-environment, and temporal progression from start to climax. IMPORTANT: describe any camera \
-switches, angle changes, or cuts in order (e.g. "The camera switches from a wide shot to a \
-close-up of...", "Cut to a POV angle showing..."). Be frame-by-frame specific.>
-[SPEECH]: <All spoken words, dirty talk, moaning, gasping, screaming, grunting — transcribe \
-exactly with intensity level (soft moan, loud scream, whispered words). Note who speaks. \
-If none, write "None.">
-[SOUNDS]: <Skin slapping, wet sounds, bed creaking, breathing patterns, music if any. \
-Describe how sounds change with intensity. If none, write "None.">
-[TEXT]: <Watermarks, titles, on-screen text. If none, write "None.">\
+Write one flowing paragraph that includes: sexual actions and positions (name specific sex \
+acts, positions, penetration types, oral acts), anatomy (genitalia, breasts, body parts \
+involved), body types (build, skin tone, hair color/style, distinguishing features), physical \
+movement (rhythm, speed, intensity, thrusting patterns), facial expressions during sex \
+(pleasure, orgasm, eye contact), body contact and fluid exchange, camera angle and any camera \
+movements or cuts, lighting, environment, temporal progression from start to end. Also \
+include any spoken words or dirty talk in quotes, moaning with intensity, and sounds like \
+skin slapping, wet sounds, bed creaking, breathing patterns, background music.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
@@ -93,22 +84,9 @@ def frames_to_base64(frames: list, quality: int = 85) -> list[str]:
 
 
 def clean_caption(text: str) -> str:
-    """Clean caption and convert to LTX-2.3 flowing paragraph format."""
-    # Remove trailing assistant artifacts
+    """Remove common VLM artifacts from generated captions."""
     text = re.split(r"\n(?:Human|Assistant|User)(?::|(?:\s*\n)|$)", text, maxsplit=1)[0]
-
-    # Strip section tags and merge into flowing paragraph
-    text = re.sub(r"\[VISUAL\]\s*:?\s*", "", text)
-    text = re.sub(r"\[SPEECH\]\s*:?\s*", "Speech: ", text)
-    text = re.sub(r"\[SOUNDS\]\s*:?\s*", "Sounds: ", text)
-    text = re.sub(r"\[TEXT\]\s*:?\s*", "On-screen text: ", text)
-
-    # Remove "None." standalone lines for empty sections
-    text = re.sub(r"(?:Speech|Sounds|On-screen text):\s*None\.?\s*", "", text)
-
-    # Collapse whitespace
     text = re.sub(r"\s+", " ", text).strip()
-
     return text
 
 
