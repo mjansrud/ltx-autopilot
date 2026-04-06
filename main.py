@@ -29,7 +29,12 @@ def setup_logging(verbose: bool = False):
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
     datefmt = "%H:%M:%S"
 
-    logging.basicConfig(level=level, format=fmt, datefmt=datefmt, stream=sys.stdout)
+    # Log to both terminal and file
+    handlers = [logging.StreamHandler(sys.stdout)]
+    log_file = Path("workspace/pipeline.log")
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    handlers.append(logging.FileHandler(str(log_file), encoding="utf-8"))
+    logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers)
 
     # Quiet noisy libraries
     for name in ["urllib3", "httpx", "httpcore", "filelock", "transformers.configuration_utils",
