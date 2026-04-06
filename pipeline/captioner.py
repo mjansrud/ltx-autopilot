@@ -279,9 +279,8 @@ class TransformersCaptioner:
                 **inputs,
                 use_audio_in_video=use_audio,
                 return_audio=False,
-                do_sample=True,
-                temperature=0.7,
-                repetition_penalty=1.3,
+                do_sample=False,
+                repetition_penalty=1.2,
                 thinker_max_new_tokens=self.max_new_tokens,
             )
 
