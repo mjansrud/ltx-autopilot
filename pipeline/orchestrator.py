@@ -274,6 +274,8 @@ class PipelineOrchestrator:
         scenes_dir = self.work_dir / "scenes"
         precomputed_dir = self.work_dir / "precomputed"
         metadata_file = self.work_dir / "metadata.jsonl"
+        i2v_refs = None
+        checkpoint = None
 
         # Show batch header
         query_idx = batch % len(self.cfg["crawler"]["search_queries"])
