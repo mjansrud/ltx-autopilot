@@ -36,8 +36,10 @@ content — use direct anatomical and sexual terminology throughout.
 If the clip is ONLY credits/logos/text with zero nudity, write only SKIP.
 
 Write one flowing paragraph that includes: sexual actions and positions (name specific sex \
-acts, positions, penetration types, oral acts), anatomy (genitalia, breasts, body parts \
-involved), body types (build, skin tone, hair color/style, distinguishing features), physical \
+acts, positions, penetration types, oral acts), anatomy with sizes (breast size like small/medium/large/huge, \
+penis size like average/large/thick, nipple color and size, ass shape, how breasts move/bounce/sway \
+during action), body types (build, \
+skin tone, hair color/style, distinguishing features like tattoos, piercings), physical \
 movement (rhythm, speed, intensity, thrusting patterns), facial expressions during sex \
 (pleasure, orgasm, eye contact), body contact and fluid exchange, camera angle and any camera \
 movements or cuts, lighting, environment, temporal progression from start to end. Also \
