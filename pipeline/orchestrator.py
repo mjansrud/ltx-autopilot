@@ -162,6 +162,58 @@ class PipelineOrchestrator:
 
         dash.show_cleanup(False)
 
+    def _generate_i2v_refs(self, batch_num: int):
+        """Generate i2v reference frames from prefetched next batch scenes.
+        Captioner must still be loaded. Saves first frame + caption for 2 clips."""
+        import cv2
+        next_batch_dir = Path(f"./workspace/batch-{batch_num + 1:04d}")
+        next_scenes = next_batch_dir / "scenes"
+
+        if not next_scenes.exists():
+            log.info("[I2V] No prefetched scenes yet, skipping")
+            return
+
+        clips = sorted(next_scenes.glob("*.mp4"))
+        if len(clips) < 2:
+            log.info("[I2V] Not enough prefetched clips (%d), skipping", len(clips))
+            return
+
+        # Pick 2 random clips from the middle
+        import random
+        picks = random.sample(clips[1:-1] if len(clips) > 3 else clips, min(2, len(clips)))
+
+        i2v_refs = []
+        i2v_dir = self.work_dir / "i2v_refs"
+        i2v_dir.mkdir(parents=True, exist_ok=True)
+
+        for clip in picks:
+            # Extract first frame
+            cap = cv2.VideoCapture(str(clip))
+            ret, frame = cap.read()
+            cap.release()
+            if not ret:
+                continue
+
+            img_path = i2v_dir / f"{clip.stem}.png"
+            cv2.imwrite(str(img_path), frame)
+
+            # Caption the frame using the still-loaded captioner
+            try:
+                caption = self.captioner.caption_video(clip)
+                if caption.strip().upper().startswith("SKIP"):
+                    continue
+                i2v_refs.append({"image": str(img_path.resolve()), "prompt": caption})
+                log.info("[I2V] Generated ref: %s (%d chars)", clip.name, len(caption))
+            except Exception as e:
+                log.warning("[I2V] Failed to caption %s: %s", clip.name, e)
+
+        # Save refs for training
+        if i2v_refs:
+            import json
+            refs_file = self.work_dir / "i2v_refs.json"
+            refs_file.write_text(json.dumps(i2v_refs, ensure_ascii=False), encoding="utf-8")
+            log.info("[I2V] Saved %d refs for validation", len(i2v_refs))
+
     def _save_batch_data(self, batch_num: int):
         """Save scenes + captions into batch dir for recovery + archival."""
         batch_data = Path("./workspace") / f"batch-{batch_num:04d}" / "data"
@@ -262,6 +314,11 @@ class PipelineOrchestrator:
                     scene_videos = videos
                 dash.show_scene_split(len(videos), len(scene_videos), split_dir)
 
+        # ── Start prefetch early so scenes are ready by end of captioning ──
+        next_batch = self.state.batch_num + 1
+        log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
+        self._start_prefetch(next_batch)
+
         # ── 3. Caption (skip if restored from cache) ─────────────
         if not cached:
             with vram_stage("captioning"):
@@ -271,6 +328,9 @@ class PipelineOrchestrator:
                 dash.show_vram_status("before caption model load", get_vram_usage())
 
                 self.captioner.caption_batch(scene_videos, metadata_file)
+
+                # Generate i2v refs from prefetched scenes (captioner still loaded)
+                self._generate_i2v_refs(batch)
 
                 # Model is now UNLOADED — GPU is free
                 flush_vram()
@@ -289,18 +349,22 @@ class PipelineOrchestrator:
             dash.show_preprocessing(precomputed_dir)
 
         # ── 5. Train (runs as subprocess, GPU occupied) ────────────
-        # Start prefetching next batch while GPU is busy training
-        next_batch = self.state.batch_num + 1
-        log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
-        self._start_prefetch(next_batch)
 
         with vram_stage("training"):
             steps = self.cfg["training"]["steps_per_batch"]
             resume_from = self.state.last_checkpoint
             dash.show_training_start(steps, resume_from)
 
+            # Load i2v refs if available
+            i2v_refs = None
+            refs_file = self.work_dir / "i2v_refs.json"
+            if refs_file.exists():
+                import json as _json
+                i2v_refs = _json.loads(refs_file.read_text(encoding="utf-8"))
+                log.info("[I2V] Passing %d refs to validation", len(i2v_refs))
+
             log.info("[5/6] Training for %d steps...", steps)
-            checkpoint = self.trainer.train(precomputed_dir, resume_from, batch_num=batch)
+            checkpoint = self.trainer.train(precomputed_dir, resume_from, batch_num=batch, i2v_refs=i2v_refs)
 
             new_total = self.state.total_steps + steps
             dash.show_training_complete(checkpoint, new_total)

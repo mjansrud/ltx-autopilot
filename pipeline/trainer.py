@@ -116,8 +116,15 @@ class Trainer:
             w = eval_cfg.get("width", 576)
             h = eval_cfg.get("height", 576)
             f = eval_cfg.get("num_frames", 49)
+            prompts = list(eval_cfg["prompts"])
+            images = None
+            if i2v_refs:
+                images = [None] * len(prompts)  # None = t2v
+                for ref in i2v_refs[:2]:
+                    prompts.append(ref["prompt"])
+                    images.append(ref["image"])
             config["validation"] = {
-                "prompts": eval_cfg["prompts"],
+                "prompts": prompts,
                 "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
                 "video_dims": [w, h, f],
                 "frame_rate": eval_cfg.get("fps", 25.0),
@@ -132,13 +139,15 @@ class Trainer:
                 "generate_audio": True,
                 "skip_initial_validation": True,
             }
+            if images:
+                config["validation"]["images"] = images
 
         batch_config_path.parent.mkdir(parents=True, exist_ok=True)
         batch_config_path.write_text(yaml.dump(config, default_flow_style=False))
         log.info("Wrote training config: %s", batch_config_path)
         return batch_config_path
 
-    def train(self, precomputed_dir: Path, resume_from: str | None = None, batch_num: int = 0) -> str | None:
+    def train(self, precomputed_dir: Path, resume_from: str | None = None, batch_num: int = 0, i2v_refs: list[dict] | None = None) -> str | None:
         """
         Run training for one batch. Returns path to latest checkpoint after training.
         """
