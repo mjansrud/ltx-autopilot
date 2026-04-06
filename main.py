@@ -32,7 +32,8 @@ def setup_logging(verbose: bool = False):
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt, stream=sys.stdout)
 
     # Quiet noisy libraries
-    for name in ["urllib3", "httpx", "httpcore", "filelock", "transformers.configuration_utils"]:
+    for name in ["urllib3", "httpx", "httpcore", "filelock", "transformers.configuration_utils",
+                  "numba", "numba.core", "numba.core.ssa", "numba.core.byteflow", "numba.core.interpreter"]:
         logging.getLogger(name).setLevel(logging.WARNING)
 
 

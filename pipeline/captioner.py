@@ -258,7 +258,7 @@ class TransformersCaptioner:
             {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
             {"role": "user", "content": [
                 {"type": "video", "video": str(video_path),
-                 "max_pixels": 480 * 360, "nframes": 32},
+                 "max_pixels": 640 * 480, "nframes": 48},
                 {"type": "text", "text": instruction},
             ]},
         ]
