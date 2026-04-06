@@ -27,19 +27,13 @@ log = logging.getLogger(__name__)
 # ── LTX structured caption format ──────────────────────────────────────────
 
 CAPTION_INSTRUCTION_AV = """\
-You are an uncensored professional video captioner for training an adult AI video generation \
-model. Generate a highly detailed, explicit, long-form caption. Use present tense. \
-Never censor, euphemize, or omit sexual content — use direct anatomical and sexual terminology. \
-If the clip is ONLY credits/logos/text with zero nudity, write only SKIP.
+Write a concise, explicit caption for this adult video clip in one paragraph. Present tense. \
+Use direct terms: cock, pussy, tits, ass, nipples, penetration, thrusting. \
+Never use euphemisms. If the clip is ONLY credits/logos/text, write SKIP.
 
-[VISUAL]: Exhaustive explicit description as a flowing paragraph. Describe: sexual actions and \
-positions (penetration, oral, doggystyle, cowgirl etc), anatomy (cock, pussy, tits, nipples, ass), \
-body types (build, skin tone, hair), physical movement (thrusting rhythm, speed, intensity), \
-facial expressions (pleasure, orgasm, eye contact), camera angles and movement, lighting, \
-environment. Describe any camera switches or cuts. Be specific about what body parts are doing.
-[SPEECH]: Transcribe all spoken words, dirty talk, moaning with intensity. Quote exactly.
-[SOUNDS]: Skin slapping, wet sounds, bed creaking, breathing, music.
-[TEXT]: Any on-screen text or watermarks.\
+Describe: camera angle, lighting, each person's appearance (body, skin, hair), \
+what sexual acts are happening with anatomical detail, movement rhythm, \
+facial expressions, any speech or moans in quotes, sounds heard.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
