@@ -259,7 +259,7 @@ class TransformersCaptioner:
             {"role": "system", "content": [{"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}]},
             {"role": "user", "content": [
                 {"type": "video", "video": str(video_path),
-                 "max_pixels": 640 * 480, "nframes": 48},
+                 "max_pixels": 640 * 480, "nframes": 42},
                 {"type": "text", "text": instruction},
             ]},
         ]
