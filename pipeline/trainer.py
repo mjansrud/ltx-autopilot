@@ -176,17 +176,15 @@ class Trainer:
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-        # Stream training output to log file (non-blocking)
-        train_log = self.output_dir / "training.log"
-        log.info("Training log: %s", train_log)
+        # Training output goes directly to terminal (progress.jsonl tracks steps)
         env["PYTHONUNBUFFERED"] = "1"
+        log.info("Training progress: %s/progress.jsonl", batch_dir or self.output_dir)
 
-        with open(train_log, "w", encoding="utf-8") as logf:
-            result = subprocess.run(
-                cmd, cwd=str(self.trainer_dir.resolve()),
-                stdout=logf, stderr=subprocess.STDOUT,
-                env=env,
-            )
+        result = subprocess.run(
+            cmd, cwd=str(self.trainer_dir.resolve()),
+            stdout=None, stderr=None,  # inherit terminal
+            env=env,
+        )
 
         if result.returncode != 0:
             # Log last 30 lines of training log for debugging
