@@ -81,15 +81,36 @@ def frames_to_base64(frames: list, quality: int = 85) -> list[str]:
 
 
 def clean_caption(text: str) -> str:
-    """Remove common VLM artifacts from generated captions."""
-    # Remove "This video shows..." / "The video depicts..." preambles
+    """Remove VLM artifacts and truncate at repetition."""
+    # Remove "This video shows..." preambles
     text = re.sub(
         r"^(This|The)\s+(video|image|clip|footage)\s+(shows?|depicts?|displays?|features?|captures?|presents?)\s+",
         "", text, flags=re.IGNORECASE,
     )
     # Remove trailing assistant artifacts
     text = re.split(r"\n(?:Human|Assistant|User)(?::|(?:\s*\n)|$)", text, maxsplit=1)[0]
-    return text.strip()
+
+    # Detect and truncate at repetition loops (4-bit model issue)
+    words = text.split()
+    for window in [3, 4, 5]:  # check 3-5 word repeating patterns
+        for i in range(len(words) - window * 3):
+            phrase = " ".join(words[i:i+window])
+            rest = " ".join(words[i+window:])
+            if rest.count(phrase) >= 3:  # repeated 3+ times
+                text = " ".join(words[:i+window])  # truncate before loop
+                break
+        else:
+            continue
+        break
+
+    # Remove meta-commentary
+    for pattern in ["Does this continue", "shall we", "trust me", "So overall",
+                     "So let us", "thus concluding", "hereby final"]:
+        idx = text.find(pattern)
+        if idx > 100:
+            text = text[:idx]
+
+    return text.strip().rstrip(".")+  "."
 
 
 # ─── Transformers backend ──────────────────────────────────────────────────
@@ -254,7 +275,7 @@ class TransformersCaptioner:
                 use_audio_in_video=use_audio,
                 return_audio=False,
                 do_sample=False,
-                repetition_penalty=1.2,
+                repetition_penalty=1.5,
                 thinker_max_new_tokens=self.max_new_tokens,
             )
 
