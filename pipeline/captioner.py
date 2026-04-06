@@ -254,8 +254,9 @@ class TransformersCaptioner:
 
         use_audio = self.include_audio
 
+        # Must use Omni's default system prompt for audio understanding to work
         conversation = [
-            {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
+            {"role": "system", "content": [{"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}]},
             {"role": "user", "content": [
                 {"type": "video", "video": str(video_path),
                  "max_pixels": 640 * 480, "nframes": 48},
