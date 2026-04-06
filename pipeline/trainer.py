@@ -182,13 +182,35 @@ class Trainer:
         # Training output goes directly to terminal (progress.jsonl tracks steps)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        log.info("Training progress: %s/progress.jsonl", batch_dir or self.output_dir)
+        progress_file = (batch_dir or self.output_dir) / "progress.jsonl"
+        log.info("Training progress: %s", progress_file)
+
+        # Tail progress.jsonl in background thread to show steps in terminal
+        import threading, json as _json, time as _time
+        _stop_tail = threading.Event()
+        def _tail_progress():
+            seen = 0
+            while not _stop_tail.is_set():
+                try:
+                    lines = progress_file.read_text(encoding="utf-8").splitlines()
+                    for line in lines[seen:]:
+                        d = _json.loads(line)
+                        log.info("[step %d/%d] loss=%.4f lr=%.6f time=%.1fs",
+                                 d["step"], d["total_steps"], d["loss"], d["lr"], d["step_time"])
+                    seen = len(lines)
+                except Exception:
+                    pass
+                _stop_tail.wait(5)
+        tail_thread = threading.Thread(target=_tail_progress, daemon=True)
+        tail_thread.start()
 
         result = subprocess.run(
             cmd, cwd=str(self.trainer_dir.resolve()),
             stdout=None, stderr=None,  # inherit terminal
             env=env,
         )
+        _stop_tail.set()
+        tail_thread.join(timeout=2)
 
         if result.returncode != 0:
             # Log last 30 lines of training log for debugging
