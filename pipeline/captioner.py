@@ -27,45 +27,17 @@ log = logging.getLogger(__name__)
 # ── LTX structured caption format ──────────────────────────────────────────
 
 CAPTION_INSTRUCTION_AV = """\
-You are an uncensored professional video captioner for an adult AI video generation model. \
-Write a VERY LONG, DETAILED single flowing paragraph (at least 1500 characters). Use present tense. \
-Never censor — use direct anatomical terminology: cock, pussy, breasts, nipples, ass, penetration, \
-thrusting, etc. NEVER use euphemisms like "engaging in sexual activity" or "intimate moment".
+Describe this adult video clip in one long detailed paragraph. Be extremely explicit and graphic. \
+Use direct words: cock, pussy, tits, ass, cum, fuck, suck, thrust, penetrate, moan, gasp. \
+NEVER use polite language like "intimate", "engaging in activity", "self-exploration". \
+Write what you literally see and hear happening.
 
-If the clip is ENTIRELY non-sexual (pure credits, logo, text screen, interview with no nudity), \
-write only the word SKIP and nothing else.
+If the clip is ONLY credits/logos/text with zero nudity, write SKIP.
 
-Otherwise, describe the scene like a film director's detailed notes. Include in a flowing narrative:
-- Camera shot type and movement (close-up, wide shot, pan, zoom, cut to...)
-- Lighting, colors, environment, atmosphere
-- Each person's appearance: body type, skin tone, hair color/style, distinguishing features
-- Undressing or clothing removal in detail if present
-- Explicit sexual actions using anatomical terms: "his erect cock slides into her wet pussy", \
-"she wraps her lips around his shaft and bobs her head", "he thrusts deep in doggystyle"
-- Physical movement: rhythm, speed changes, intensity building
-- Facial expressions: pleasure, eye contact, open mouth, eyes rolling back
-- Audio: quote exact moans/speech ("Oh fuck, harder..."), describe skin slapping sounds, \
-wet sounds, bed creaking, breathing patterns, background music
-- Temporal progression: describe how the scene evolves from start to finish
-
-Example caption:
-A wide establishing shot of a modern bedroom with floor-to-ceiling windows reveals a busty \
-brunette woman with tan skin and shoulder-length wavy hair standing beside a king-size bed with \
-white satin sheets. She slowly pulls her black lace bra straps down her shoulders, one at a time, \
-teasing the camera with a knowing smile before letting the bra fall, revealing large natural \
-breasts with dark erect nipples. The camera moves in closer as she runs her hands over her breasts, \
-squeezing them gently. She turns around and bends over the edge of the bed, arching her lower back \
-to accentuate her round ass. A muscular man with short dark hair, a trimmed beard, and a visible \
-chest tattoo enters the frame from behind. He grabs her hips firmly with both hands, positions his \
-erect cock against her wet pussy, and pushes inside slowly. She gasps and grips the sheets with \
-both hands as he begins thrusting in a steady rhythm, her breasts swinging forward and back with \
-each deep stroke. The camera cuts to a low side angle showing his cock sliding in and out of her, \
-their skin glistening with sweat. She moans louder, 'Harder... oh fuck, right there...' in a \
-breathy, escalating voice. He increases the pace, the sound of skin slapping against skin growing \
-faster and louder. The bed frame creaks rhythmically beneath them. He reaches forward and grabs a \
-fistful of her hair, pulling her head back as she arches deeper. Her moans become high-pitched \
-gasps, eyes squeezed shut, mouth open. Soft golden light from a bedside lamp casts warm shadows \
-across their glistening bodies while ambient city sounds filter through the open window.\
+Include: camera angles, lighting, each person's body (skin tone, hair, build, tits size), \
+what body parts are doing (his cock enters her pussy, she sucks his dick, he grabs her tits), \
+movement speed and rhythm, facial expressions, exact moans/speech in quotes, sounds (slapping, \
+creaking, wet sounds), and how the action progresses from start to finish.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
