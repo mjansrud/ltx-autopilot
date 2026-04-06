@@ -331,9 +331,12 @@ class TransformersCaptioner:
         self.load()
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        results = []
-        # Store paths relative to metadata file so process_dataset.py resolves correctly
         metadata_dir = output_file.parent.resolve()
+        count = 0
+
+        # Clear file, then append each caption as it completes
+        with open(output_file, "w", encoding="utf-8") as f:
+            pass
 
         for i, vpath in enumerate(video_paths):
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
@@ -344,18 +347,16 @@ class TransformersCaptioner:
                     rel_path = str(vpath.resolve().relative_to(metadata_dir))
                 except ValueError:
                     rel_path = str(vpath.resolve())
-                results.append({"media_path": rel_path, "caption": caption})
+                entry = {"media_path": rel_path, "caption": caption}
+                with open(output_file, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                count += 1
                 log.info("  Caption preview: %.120s...", caption)
             except Exception as e:
                 log.error("  Failed to caption %s: %s", vpath.name, e)
                 continue
 
-        # Write JSONL
-        with open(output_file, "w", encoding="utf-8") as f:
-            for entry in results:
-                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-        log.info("Wrote %d captions to %s", len(results), output_file)
+        log.info("Wrote %d captions to %s", count, output_file)
 
         self.unload()
         return output_file
@@ -438,7 +439,7 @@ class OpenAICompatCaptioner:
             for entry in results:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
-        log.info("Wrote %d captions to %s", len(results), output_file)
+        log.info("Wrote %d captions to %s", count, output_file)
 
         self.unload()
         return output_file
