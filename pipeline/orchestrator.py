@@ -350,18 +350,17 @@ class PipelineOrchestrator:
 
         # ── 5. Train (runs as subprocess, GPU occupied) ────────────
 
+        # Load i2v refs if available
+        i2v_refs = None
+        refs_file = self.work_dir / "i2v_refs.json"
+        if refs_file.exists():
+            i2v_refs = json.loads(refs_file.read_text(encoding="utf-8"))
+            log.info("[I2V] Passing %d refs to validation", len(i2v_refs))
+
         with vram_stage("training"):
             steps = self.cfg["training"]["steps_per_batch"]
             resume_from = self.state.last_checkpoint
             dash.show_training_start(steps, resume_from)
-
-            # Load i2v refs if available
-            i2v_refs = None
-            refs_file = self.work_dir / "i2v_refs.json"
-            if refs_file.exists():
-                import json as _json
-                i2v_refs = _json.loads(refs_file.read_text(encoding="utf-8"))
-                log.info("[I2V] Passing %d refs to validation", len(i2v_refs))
 
             log.info("[5/6] Training for %d steps...", steps)
             checkpoint = self.trainer.train(precomputed_dir, resume_from, batch_num=batch, i2v_refs=i2v_refs)
