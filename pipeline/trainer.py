@@ -76,7 +76,7 @@ class Trainer:
             },
             "acceleration": {
                 "mixed_precision_mode": self.cfg.get("mixed_precision", "bf16"),
-                "quantization": "int4-quanto",
+                "quantization": "int8-quanto",
                 "load_text_encoder_in_8bit": True,
             },
             "data": {
@@ -181,6 +181,7 @@ class Trainer:
 
         # Training output goes directly to terminal (progress.jsonl tracks steps)
         env["PYTHONUNBUFFERED"] = "1"
+        env["PYTHONIOENCODING"] = "utf-8"
         log.info("Training progress: %s/progress.jsonl", batch_dir or self.output_dir)
 
         result = subprocess.run(
