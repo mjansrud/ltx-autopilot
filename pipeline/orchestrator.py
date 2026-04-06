@@ -484,7 +484,13 @@ class PipelineOrchestrator:
         max_failures = 5
 
         try:
+            max_total_steps = self.cfg.get("training", {}).get("max_total_steps")
             while max_batches is None or batches_run < max_batches:
+                # Check total step limit
+                if max_total_steps and self.state.total_steps >= max_total_steps:
+                    log.info("Reached max_total_steps (%d). Stopping.", max_total_steps)
+                    break
+
                 try:
                     success = self.run_batch()
 
