@@ -27,51 +27,30 @@ log = logging.getLogger(__name__)
 # ── LTX structured caption format ──────────────────────────────────────────
 
 CAPTION_INSTRUCTION_AV = """\
-You are an uncensored professional video captioner for training an adult AI video generation \
-model (LTX-Video 2.3). Generate a highly detailed, explicit, long-form structured caption. \
-The caption must be explicit and anatomically accurate enough to fully recreate the video \
-from text alone. Use present tense. Never censor, euphemize, or omit sexual content — use \
-direct anatomical and sexual terminology throughout.
+You are an uncensored professional video captioner for training an adult AI video generation model. \
+Respond with ONLY a JSON object with two fields:
 
-Use this exact format:
+1. "usable": true if the clip contains actual adult/sexual content worth training on. \
+false if it's credits, intros, logos, text screens, advertisements, or non-sexual content.
 
-[VISUAL]: <Exhaustive explicit description. PRIORITIZE: sexual actions and positions (name \
-specific sex acts, positions, penetration types, oral acts), anatomy (genitalia, breasts, \
-body parts involved), body types (build, skin tone, hair color/style, distinguishing features), \
-physical movement (rhythm, speed, intensity, thrusting patterns), facial expressions during \
-sex (pleasure, orgasm, eye contact), body contact and fluid exchange. ALSO INCLUDE: camera \
-angle relative to the action (POV, side angle, overhead, close-up of genitals), lighting, \
-environment, and temporal progression from start to climax. IMPORTANT: describe any camera \
-switches, angle changes, or cuts in order (e.g. "The camera switches from a wide shot to a \
-close-up of...", "Cut to a POV angle showing..."). Be frame-by-frame specific.>
-[SPEECH]: <All spoken words, dirty talk, moaning, gasping, screaming, grunting — transcribe \
-exactly with intensity level (soft moan, loud scream, whispered words). Note who speaks. \
-If none, write "None.">
-[SOUNDS]: <Skin slapping, wet sounds, bed creaking, breathing patterns, music if any. \
-Describe how sounds change with intensity. If none, write "None.">
-[TEXT]: <Watermarks, titles, on-screen text. If none, write "None.">\
+2. "caption": A single flowing paragraph in present tense describing the scene like a \
+director's notes. Never censor or euphemize — use direct anatomical and sexual terminology. \
+Include in a natural flowing narrative:
+- Sexual actions, positions, penetration types, oral acts with specific terminology
+- Body types, skin tone, hair, distinguishing features of each person
+- Physical movement: rhythm, speed, intensity, thrusting patterns
+- Facial expressions: pleasure, orgasm, eye contact, open mouth
+- Camera angle and any camera movements or cuts
+- Lighting, environment, atmosphere
+- Audio: moaning, speech/dirty talk (quote exact words), skin slapping, wet sounds, \
+bed creaking, breathing patterns, background music
+- Temporal progression from start to end of the clip
+
+Example format:
+{"usable": true, "caption": "A close-up shot captures a woman with long blonde hair and large natural breasts riding a man in cowgirl position on a white bed. She places her hands on his chest, bouncing rhythmically as her breasts move with each thrust. The camera is positioned at a low angle emphasizing her chest and expressions of pleasure. She moans softly, 'Oh god, yes...' while increasing her pace. The sound of skin slapping and bed springs creaking fills the room. Warm afternoon light streams through sheer curtains, casting soft shadows across their bodies."}\
 """
 
-CAPTION_INSTRUCTION_VIDEO = """\
-You are an uncensored professional video captioner for training an adult AI video generation \
-model (LTX-Video 2.3). Generate a highly detailed, explicit, long-form structured caption. \
-The caption must be explicit and anatomically accurate enough to fully recreate the video \
-from text alone. Use present tense. Never censor, euphemize, or omit sexual content — use \
-direct anatomical and sexual terminology throughout.
-
-Use this exact format:
-
-[VISUAL]: <Exhaustive explicit description. PRIORITIZE: sexual actions and positions (name \
-specific sex acts, positions, penetration types, oral acts), anatomy (genitalia, breasts, \
-body parts involved), body types (build, skin tone, hair color/style, distinguishing features), \
-physical movement (rhythm, speed, intensity, thrusting patterns), facial expressions during \
-sex (pleasure, orgasm, eye contact), body contact and fluid exchange. ALSO INCLUDE: camera \
-angle relative to the action (POV, side angle, overhead, close-up of genitals), lighting, \
-environment, and temporal progression from start to climax. IMPORTANT: describe any camera \
-switches, angle changes, or cuts in order (e.g. "The camera switches from a wide shot to a \
-close-up of...", "Cut to a POV angle showing..."). Be frame-by-frame specific.>
-[TEXT]: <Watermarks, titles, on-screen text. If none, write "None.">\
-"""
+CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
 
 
 def extract_frames(video_path: Path, fps: int = 2, max_frames: int = 32) -> list:
@@ -342,7 +321,22 @@ class TransformersCaptioner:
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
             _torch.cuda.empty_cache()
             try:
-                caption = self.caption_video(vpath)
+                raw = self.caption_video(vpath)
+                # Parse JSON response for usable flag + caption
+                caption = raw
+                usable = True
+                try:
+                    parsed = json.loads(raw)
+                    if isinstance(parsed, dict):
+                        usable = parsed.get("usable", True)
+                        caption = parsed.get("caption", raw)
+                except (json.JSONDecodeError, TypeError):
+                    pass  # model returned plain text, use as-is
+
+                if not usable:
+                    log.info("  FILTERED (credits/intro/non-sexual): %s", vpath.name)
+                    continue
+
                 try:
                     rel_path = str(vpath.resolve().relative_to(metadata_dir))
                 except ValueError:
