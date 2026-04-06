@@ -101,6 +101,17 @@ class Trainer:
 
         if resume_from:
             config["model"]["load_checkpoint"] = str(Path(resume_from).resolve())
+            # Total steps = current step + steps_per_batch (cumulative)
+            import re
+            ckpt_path = Path(resume_from)
+            lora_files = sorted(ckpt_path.glob("lora_weights_step_*.safetensors")) if ckpt_path.is_dir() else []
+            if lora_files:
+                match = re.search(r"(\d+)", lora_files[-1].stem)
+                if match:
+                    current_step = int(match.group(1))
+                    config["optimization"]["steps"] = current_step + self.cfg["steps_per_batch"]
+                    log.info("Resuming from step %d, will train to step %d",
+                             current_step, config["optimization"]["steps"])
 
         # Validation config
         if eval_cfg.get("prompts"):
