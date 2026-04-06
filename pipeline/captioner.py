@@ -257,7 +257,8 @@ class TransformersCaptioner:
         conversation = [
             {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
             {"role": "user", "content": [
-                {"type": "video", "video": str(video_path)},
+                {"type": "video", "video": str(video_path),
+                 "max_pixels": 480 * 360, "nframes": 32},
                 {"type": "text", "text": instruction},
             ]},
         ]
@@ -325,6 +326,7 @@ class TransformersCaptioner:
 
     def caption_batch(self, video_paths: list[Path], output_file: Path) -> Path:
         """Caption all videos, write metadata JSONL. Loads model, captions, unloads."""
+        import torch as _torch
         self.load()
 
         output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +336,7 @@ class TransformersCaptioner:
 
         for i, vpath in enumerate(video_paths):
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
+            _torch.cuda.empty_cache()
             try:
                 caption = self.caption_video(vpath)
                 try:
@@ -418,6 +421,7 @@ class OpenAICompatCaptioner:
 
         for i, vpath in enumerate(video_paths):
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
+            _torch.cuda.empty_cache()
             try:
                 caption = self.caption_video(vpath)
                 try:
