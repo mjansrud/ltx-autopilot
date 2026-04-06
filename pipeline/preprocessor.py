@@ -57,8 +57,7 @@ class Preprocessor:
         if self.with_audio:
             cmd.append("--with-audio")
 
-        # Low VRAM optimizations for 32GB GPUs
-        cmd.append("--vae-tiling")
+        # Low VRAM: 8bit text encoder (vae-tiling removed — not needed at 512x512)
         cmd.append("--load-text-encoder-in-8bit")
 
         if self.lora_trigger:
