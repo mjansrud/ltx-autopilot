@@ -40,7 +40,8 @@ class Trainer:
         return None
 
     def build_config(self, precomputed_dir: Path, batch_config_path: Path,
-                     resume_from: str | None = None, batch_dir: Path | None = None) -> Path:
+                     resume_from: str | None = None, batch_dir: Path | None = None,
+                     i2v_refs: list[dict] | None = None) -> Path:
         """Write a YAML config matching the LTX trainer's Pydantic schema."""
         eval_cfg = self.cfg.get("_eval_config", {})
         lora_cfg = self.cfg.get("lora", {})
@@ -162,7 +163,7 @@ class Trainer:
             resume_from = self.find_latest_checkpoint()
 
         batch_config = batch_dir / "_current_batch_config.yaml"
-        self.build_config(precomputed_dir, batch_config, resume_from, batch_dir)
+        self.build_config(precomputed_dir, batch_config, resume_from, batch_dir, i2v_refs)
 
         script = self.trainer_dir / "scripts" / "train.py"
         if not script.exists():
