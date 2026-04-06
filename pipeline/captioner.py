@@ -93,15 +93,23 @@ def frames_to_base64(frames: list, quality: int = 85) -> list[str]:
 
 
 def clean_caption(text: str) -> str:
-    """Remove common VLM artifacts from generated captions."""
-    # Remove "This video shows..." preambles
-    text = re.sub(
-        r"^(This|The)\s+(video|image|clip|footage)\s+(shows?|depicts?|displays?|features?|captures?|presents?)\s+",
-        "", text, flags=re.IGNORECASE,
-    )
+    """Clean caption and convert to LTX-2.3 flowing paragraph format."""
     # Remove trailing assistant artifacts
     text = re.split(r"\n(?:Human|Assistant|User)(?::|(?:\s*\n)|$)", text, maxsplit=1)[0]
-    return text.strip()
+
+    # Strip section tags and merge into flowing paragraph
+    text = re.sub(r"\[VISUAL\]\s*:?\s*", "", text)
+    text = re.sub(r"\[SPEECH\]\s*:?\s*", "Speech: ", text)
+    text = re.sub(r"\[SOUNDS\]\s*:?\s*", "Sounds: ", text)
+    text = re.sub(r"\[TEXT\]\s*:?\s*", "On-screen text: ", text)
+
+    # Remove "None." standalone lines for empty sections
+    text = re.sub(r"(?:Speech|Sounds|On-screen text):\s*None\.?\s*", "", text)
+
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text
 
 
 # ─── Transformers backend ──────────────────────────────────────────────────
