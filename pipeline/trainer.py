@@ -22,15 +22,24 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def find_latest_checkpoint(self) -> str | None:
-        """Find the most recent checkpoint directory."""
-        candidates = sorted(
-            self.output_dir.glob("checkpoint-*"),
-            key=lambda p: int(p.name.split("-")[-1]) if p.name.split("-")[-1].isdigit() else 0,
-        )
+        """Find the most recent LoRA checkpoint."""
+        import re
+        # LTX trainer saves as checkpoints/lora_weights_step_NNNNN.safetensors
+        ckpt_dir = self.output_dir / "checkpoints"
+        if ckpt_dir.exists():
+            lora_files = sorted(
+                ckpt_dir.glob("lora_weights_step_*.safetensors"),
+                key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)) if re.search(r"(\d+)", p.stem) else 0,
+            )
+            if lora_files:
+                # Pass the directory — LTX trainer finds latest checkpoint inside
+                latest = str(ckpt_dir)
+                log.info("Found checkpoint dir: %s (latest: %s)", latest, lora_files[-1].name)
+                return latest
+        # Also check old format (checkpoint-*)
+        candidates = sorted(self.output_dir.glob("checkpoint-*"))
         if candidates:
-            latest = str(candidates[-1])
-            log.info("Found latest checkpoint: %s", latest)
-            return latest
+            return str(candidates[-1])
         return None
 
     def build_config(self, precomputed_dir: Path, batch_config_path: Path,
