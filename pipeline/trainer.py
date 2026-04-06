@@ -175,6 +175,9 @@ class Trainer:
         env = os.environ.copy()
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
+        # Ensure ninja is on PATH for quanto int4 CUDA kernel compilation
+        venv_scripts = str(Path(sys.executable).parent)
+        env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
 
         # Training output goes directly to terminal (progress.jsonl tracks steps)
         env["PYTHONUNBUFFERED"] = "1"
