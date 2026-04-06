@@ -22,28 +22,25 @@ class Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def find_latest_checkpoint(self) -> str | None:
-        """Find the most recent LoRA checkpoint."""
+        """Find the most recent LoRA checkpoint across all batch dirs."""
         import re
-        # LTX trainer saves as checkpoints/lora_weights_step_NNNNN.safetensors
-        ckpt_dir = self.output_dir / "checkpoints"
-        if ckpt_dir.exists():
-            lora_files = sorted(
-                ckpt_dir.glob("lora_weights_step_*.safetensors"),
-                key=lambda p: int(re.search(r"(\d+)", p.stem).group(1)) if re.search(r"(\d+)", p.stem) else 0,
-            )
-            if lora_files:
-                # Pass the directory — LTX trainer finds latest checkpoint inside
-                latest = str(ckpt_dir)
-                log.info("Found checkpoint dir: %s (latest: %s)", latest, lora_files[-1].name)
-                return latest
-        # Also check old format (checkpoint-*)
-        candidates = sorted(self.output_dir.glob("checkpoint-*"))
-        if candidates:
-            return str(candidates[-1])
+        all_lora_files = []
+        # Search all batch-*/checkpoints/ directories
+        for ckpt_dir in self.output_dir.glob("batch-*/checkpoints"):
+            for f in ckpt_dir.glob("lora_weights_step_*.safetensors"):
+                match = re.search(r"(\d+)", f.stem)
+                if match:
+                    all_lora_files.append((int(match.group(1)), f, ckpt_dir))
+
+        if all_lora_files:
+            all_lora_files.sort(key=lambda x: x[0])
+            step, latest_file, ckpt_dir = all_lora_files[-1]
+            log.info("Found checkpoint: step %d in %s", step, ckpt_dir)
+            return str(ckpt_dir)
         return None
 
     def build_config(self, precomputed_dir: Path, batch_config_path: Path,
-                     resume_from: str | None = None) -> Path:
+                     resume_from: str | None = None, batch_dir: Path | None = None) -> Path:
         """Write a YAML config matching the LTX trainer's Pydantic schema."""
         eval_cfg = self.cfg.get("_eval_config", {})
         lora_cfg = self.cfg.get("lora", {})
@@ -96,7 +93,7 @@ class Trainer:
                 "timestep_sampling_params": {},
             },
             "seed": 42,
-            "output_dir": str(self.output_dir.resolve()),
+            "output_dir": str((batch_dir or self.output_dir).resolve()),
         }
 
         if resume_from:
@@ -141,18 +138,22 @@ class Trainer:
         log.info("Wrote training config: %s", batch_config_path)
         return batch_config_path
 
-    def train(self, precomputed_dir: Path, resume_from: str | None = None) -> str | None:
+    def train(self, precomputed_dir: Path, resume_from: str | None = None, batch_num: int = 0) -> str | None:
         """
         Run training for one batch. Returns path to latest checkpoint after training.
         """
         log_vram("training — start")
 
-        # Auto-resume
+        # Per-batch output directory
+        batch_dir = self.output_dir / f"batch-{batch_num}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-resume from latest checkpoint across all batches
         if resume_from is None and self.cfg.get("auto_resume", True):
             resume_from = self.find_latest_checkpoint()
 
-        batch_config = self.output_dir / "_current_batch_config.yaml"
-        self.build_config(precomputed_dir, batch_config, resume_from)
+        batch_config = batch_dir / "_current_batch_config.yaml"
+        self.build_config(precomputed_dir, batch_config, resume_from, batch_dir)
 
         script = self.trainer_dir / "scripts" / "train.py"
         if not script.exists():

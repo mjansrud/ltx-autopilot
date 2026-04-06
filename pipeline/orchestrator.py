@@ -333,7 +333,7 @@ class PipelineOrchestrator:
             dash.show_training_start(steps, resume_from)
 
             log.info("[5/6] Training for %d steps...", steps)
-            checkpoint = self.trainer.train(precomputed_dir, resume_from)
+            checkpoint = self.trainer.train(precomputed_dir, resume_from, batch_num=batch)
 
             new_total = self.state.total_steps + steps
             dash.show_training_complete(checkpoint, new_total)
