@@ -50,8 +50,9 @@ Example format:
 {"usable": true, "caption": "A medium shot in a warmly lit bedroom shows a busty brunette woman with tan skin slowly pulling her black lace bra straps down her shoulders, revealing large natural breasts with dark nipples. She looks directly into the camera with parted lips and half-closed eyes, then turns and bends over the edge of a bed, arching her back. A muscular man with short dark hair enters the frame from behind, gripping her hips and thrusting into her in doggystyle position. Her breasts swing forward with each thrust as she grips the white sheets tightly. She moans, 'Harder... oh fuck...' in a breathy voice, the pace quickening. The camera slowly pans from a wide side angle to a close-up of their bodies connecting. The sound of rhythmic skin slapping, her escalating moans, and bed frame creaking fills the scene. Soft golden light from a bedside lamp creates warm shadows across their glistening skin."}
 {"usable": false, "caption": ""}
 
-If the clip shows credits, logos, title screens, text overlays, advertisements, \
-interviews, or non-sexual content like talking heads, return usable=false.\
+ONLY return usable=false if the clip is ENTIRELY non-sexual: pure text/credits screen, \
+logo animation, or interview with no nudity at all. If there is ANY nudity, undressing, \
+or sexual activity, return usable=true even if the clip also has non-sexual moments.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
