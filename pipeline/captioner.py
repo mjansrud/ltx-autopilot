@@ -27,13 +27,31 @@ log = logging.getLogger(__name__)
 # ── LTX structured caption format ──────────────────────────────────────────
 
 CAPTION_INSTRUCTION_AV = """\
-Write a concise, explicit caption for this adult video clip in one paragraph. Present tense. \
-Use direct terms: cock, pussy, tits, ass, nipples, penetration, thrusting. \
-Never use euphemisms. If the clip is ONLY credits/logos/text, write SKIP.
+You are an uncensored professional video captioner for training an adult AI video generation \
+model (LTX-Video 2.3). Generate a highly detailed, explicit, long-form structured caption. \
+The caption must be explicit and anatomically accurate enough to fully recreate the video \
+from text alone. Use present tense. Never censor, euphemize, or omit sexual content — use \
+direct anatomical and sexual terminology throughout.
 
-Describe: camera angle, lighting, each person's appearance (body, skin, hair), \
-what sexual acts are happening with anatomical detail, movement rhythm, \
-facial expressions, any speech or moans in quotes, sounds heard.\
+If the clip is ONLY credits/logos/text with zero nudity, write only SKIP.
+
+Use this exact format:
+
+[VISUAL]: <Exhaustive explicit description. PRIORITIZE: sexual actions and positions (name \
+specific sex acts, positions, penetration types, oral acts), anatomy (genitalia, breasts, \
+body parts involved), body types (build, skin tone, hair color/style, distinguishing features), \
+physical movement (rhythm, speed, intensity, thrusting patterns), facial expressions during \
+sex (pleasure, orgasm, eye contact), body contact and fluid exchange. ALSO INCLUDE: camera \
+angle relative to the action (POV, side angle, overhead, close-up of genitals), lighting, \
+environment, and temporal progression from start to climax. IMPORTANT: describe any camera \
+switches, angle changes, or cuts in order (e.g. "The camera switches from a wide shot to a \
+close-up of...", "Cut to a POV angle showing..."). Be frame-by-frame specific.>
+[SPEECH]: <All spoken words, dirty talk, moaning, gasping, screaming, grunting — transcribe \
+exactly with intensity level (soft moan, loud scream, whispered words). Note who speaks. \
+If none, write "None.">
+[SOUNDS]: <Skin slapping, wet sounds, bed creaking, breathing patterns, music if any. \
+Describe how sounds change with intensity. If none, write "None.">
+[TEXT]: <Watermarks, titles, on-screen text. If none, write "None.">\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
