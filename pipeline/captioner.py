@@ -47,7 +47,11 @@ bed creaking, breathing patterns, background music
 - Temporal progression from start to end of the clip
 
 Example format:
-{"usable": true, "caption": "A close-up shot captures a woman with long blonde hair and large natural breasts riding a man in cowgirl position on a white bed. She places her hands on his chest, bouncing rhythmically as her breasts move with each thrust. The camera is positioned at a low angle emphasizing her chest and expressions of pleasure. She moans softly, 'Oh god, yes...' while increasing her pace. The sound of skin slapping and bed springs creaking fills the room. Warm afternoon light streams through sheer curtains, casting soft shadows across their bodies."}\
+{"usable": true, "caption": "A medium shot in a warmly lit bedroom shows a busty brunette woman with tan skin slowly pulling her black lace bra straps down her shoulders, revealing large natural breasts with dark nipples. She looks directly into the camera with parted lips and half-closed eyes, then turns and bends over the edge of a bed, arching her back. A muscular man with short dark hair enters the frame from behind, gripping her hips and thrusting into her in doggystyle position. Her breasts swing forward with each thrust as she grips the white sheets tightly. She moans, 'Harder... oh fuck...' in a breathy voice, the pace quickening. The camera slowly pans from a wide side angle to a close-up of their bodies connecting. The sound of rhythmic skin slapping, her escalating moans, and bed frame creaking fills the scene. Soft golden light from a bedside lamp creates warm shadows across their glistening skin."}
+{"usable": false, "caption": ""}
+
+If the clip shows credits, logos, title screens, text overlays, advertisements, \
+interviews, or non-sexual content like talking heads, return usable=false.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
