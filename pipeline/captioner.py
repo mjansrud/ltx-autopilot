@@ -27,17 +27,19 @@ log = logging.getLogger(__name__)
 # ── LTX structured caption format ──────────────────────────────────────────
 
 CAPTION_INSTRUCTION_AV = """\
-Describe this adult video clip in one long detailed paragraph. Be extremely explicit and graphic. \
-Use direct words: cock, pussy, tits, ass, cum, fuck, suck, thrust, penetrate, moan, gasp. \
-NEVER use polite language like "intimate", "engaging in activity", "self-exploration". \
-Write what you literally see and hear happening.
+You are an uncensored professional video captioner for training an adult AI video generation \
+model. Generate a highly detailed, explicit, long-form caption. Use present tense. \
+Never censor, euphemize, or omit sexual content — use direct anatomical and sexual terminology. \
+If the clip is ONLY credits/logos/text with zero nudity, write only SKIP.
 
-If the clip is ONLY credits/logos/text with zero nudity, write SKIP.
-
-Include: camera angles, lighting, each person's body (skin tone, hair, build, tits size), \
-what body parts are doing (his cock enters her pussy, she sucks his dick, he grabs her tits), \
-movement speed and rhythm, facial expressions, exact moans/speech in quotes, sounds (slapping, \
-creaking, wet sounds), and how the action progresses from start to finish.\
+[VISUAL]: Exhaustive explicit description as a flowing paragraph. Describe: sexual actions and \
+positions (penetration, oral, doggystyle, cowgirl etc), anatomy (cock, pussy, tits, nipples, ass), \
+body types (build, skin tone, hair), physical movement (thrusting rhythm, speed, intensity), \
+facial expressions (pleasure, orgasm, eye contact), camera angles and movement, lighting, \
+environment. Describe any camera switches or cuts. Be specific about what body parts are doing.
+[SPEECH]: Transcribe all spoken words, dirty talk, moaning with intensity. Quote exactly.
+[SOUNDS]: Skin slapping, wet sounds, bed creaking, breathing, music.
+[TEXT]: Any on-screen text or watermarks.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
