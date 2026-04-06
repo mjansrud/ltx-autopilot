@@ -145,7 +145,7 @@ class Trainer:
         log_vram("training — start")
 
         # Per-batch output directory
-        batch_dir = self.output_dir / f"batch-{batch_num}"
+        batch_dir = self.output_dir / f"batch-{batch_num:04d}"
         batch_dir.mkdir(parents=True, exist_ok=True)
 
         # Auto-resume from latest checkpoint across all batches

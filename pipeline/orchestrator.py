@@ -65,44 +65,30 @@ class PipelineOrchestrator:
     def _ensure_work_dir(self):
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
-    def _restore_from_cache(self, scenes_dir: Path, metadata_file: Path) -> list[Path] | None:
-        """Restore scenes + captions from cache for crash recovery (same batch only)."""
-        cache_dir = Path("./workspace/history")
-        cache_batch_file = cache_dir / "batch_num.txt"
+    def _restore_from_batch_dir(self, scenes_dir: Path, metadata_file: Path) -> list[Path] | None:
+        """Restore scenes + captions from batch dir (crash recovery)."""
+        batch = self.state.batch_num
+        batch_data = Path("./workspace") / f"batch-{batch:04d}" / "data"
+        batch_scenes = batch_data / "scenes"
+        batch_captions = batch_data / "metadata.jsonl"
 
-        # Only restore if cache is from the SAME batch (crash recovery)
-        if not cache_batch_file.exists():
-            return None
-        try:
-            cached_batch = int(cache_batch_file.read_text().strip())
-        except (ValueError, OSError):
-            return None
-        if cached_batch != self.state.batch_num:
-            # Different batch — clear stale cache
-            if cache_dir.exists():
-                shutil.rmtree(cache_dir, ignore_errors=True)
+        if not batch_scenes.exists() or not batch_captions.exists():
             return None
 
-        cache_scenes = cache_dir / "scenes"
-        cache_captions = cache_dir / "captions.jsonl"
-
-        if not cache_scenes.exists() or not cache_captions.exists():
-            return None
-
-        cached_clips = sorted(cache_scenes.glob("*.mp4"))
+        cached_clips = sorted(batch_scenes.glob("*.mp4"))
         if not cached_clips:
             return None
 
-        # Copy cached scenes into workspace
+        # Copy into workspace
         scenes_dir.mkdir(parents=True, exist_ok=True)
         for clip in cached_clips:
             dst = scenes_dir / clip.name
             if not dst.exists():
                 shutil.copy2(clip, dst)
 
-        # Build metadata with only clips that have captions
+        # Build metadata
         captioned = {}
-        for line in cache_captions.read_text(encoding="utf-8").splitlines():
+        for line in batch_captions.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 entry = json.loads(line)
                 name = Path(entry["media_path"]).name
@@ -162,71 +148,55 @@ class PipelineOrchestrator:
             return None
 
     def _cleanup(self):
-        """Remove precomputed latents but keep scenes + captions in cache."""
-        cleanup_cfg = self.cfg.get("cleanup", {})
-
-        if not cleanup_cfg.get("delete_after_training", True):
-            return
-
+        """Delete working dir (batch data already saved by _save_batch_data)."""
         if self.work_dir.exists():
             shutil.rmtree(self.work_dir, ignore_errors=True)
 
-        # Prune history if it exceeds max size
+        # Prune old batch data if total exceeds limit
+        cleanup_cfg = self.cfg.get("cleanup", {})
         max_gb = cleanup_cfg.get("max_history_gb", 20)
-        self._prune_history(max_gb)
+        self._prune_batches(max_gb)
 
         dash.show_cleanup(False)
 
-    def _save_to_history(self):
-        """Cache scenes + captions for crash recovery (tagged with batch number)."""
-        history = Path("./workspace/history")
-        # Clear previous batch's cache
-        if history.exists():
-            shutil.rmtree(history, ignore_errors=True)
-        history.mkdir(parents=True, exist_ok=True)
+    def _save_batch_data(self, batch_num: int):
+        """Save scenes + captions into batch dir for recovery + archival."""
+        batch_data = Path("./workspace") / f"batch-{batch_num:04d}" / "data"
+        batch_data.mkdir(parents=True, exist_ok=True)
 
-        # Tag with current batch number
-        (history / "batch_num.txt").write_text(str(self.state.batch_num))
-
-        for subdir in ["scenes"]:
-            src = self.work_dir / subdir
-            if src.exists():
-                dst = history / subdir
-                dst.mkdir(exist_ok=True)
-                for f in src.glob("*.mp4"):
-                    shutil.copy2(f, dst / f.name)
-
-        meta_src = self.work_dir / "metadata.jsonl"
-        if meta_src.exists():
-            shutil.copy2(meta_src, history / "captions.jsonl")
+        for item in ["scenes", "metadata.jsonl"]:
+            src = self.work_dir / item
+            dst = batch_data / item
+            if src.exists() and not dst.exists():
+                if src.is_dir():
+                    shutil.copytree(src, dst)
+                else:
+                    shutil.copy2(src, dst)
 
         log.info("[HISTORY] Cached scenes + captions")
 
-    def _prune_history(self, max_gb: float):
-        """Delete oldest clips from history when it exceeds max_gb."""
-        history = Path("./workspace/history")
-        if not history.exists():
+    def _prune_batches(self, max_gb: float):
+        """Delete oldest batch data dirs when total exceeds max_gb."""
+        batch_dirs = sorted(Path("./workspace").glob("batch-*"))
+        if not batch_dirs:
             return
 
-        # Calculate total size
-        all_files = sorted(history.rglob("*"), key=lambda f: f.stat().st_mtime if f.is_file() else 0)
-        total = sum(f.stat().st_size for f in all_files if f.is_file())
+        total = sum(f.stat().st_size for d in batch_dirs for f in d.rglob("*") if f.is_file())
         max_bytes = max_gb * 1024 ** 3
 
         if total <= max_bytes:
             return
 
-        # Delete oldest files first (mp4s are the big ones)
-        deleted = 0
-        for f in all_files:
-            if not f.is_file() or total <= max_bytes:
+        # Delete oldest batch data dirs first (keep checkpoints)
+        for batch_dir in batch_dirs:
+            if total <= max_bytes:
                 break
-            size = f.stat().st_size
-            f.unlink()
-            total -= size
-            deleted += 1
-
-        log.info("[PRUNE] Deleted %d old files from history (now %.1f GB)", deleted, total / 1024**3)
+            data_dir = batch_dir / "data"
+            if data_dir.exists():
+                size = sum(f.stat().st_size for f in data_dir.rglob("*") if f.is_file())
+                shutil.rmtree(data_dir, ignore_errors=True)
+                total -= size
+                log.info("[PRUNE] Deleted data from %s (freed %.1f MB)", batch_dir.name, size / 1024**2)
 
     def run_batch(self) -> bool:
         """
@@ -257,7 +227,7 @@ class PipelineOrchestrator:
         dash.show_vram_status("batch start", get_vram_usage())
 
         # ── 1+2. Try history cache → prefetch → fresh download ─────
-        cached = self._restore_from_cache(scenes_dir, metadata_file)
+        cached = self._restore_from_batch_dir(scenes_dir, metadata_file)
         prefetched = self._collect_prefetch() if not cached else None
 
         if cached:
@@ -313,7 +283,7 @@ class PipelineOrchestrator:
                 dash.show_captions(metadata_file)
 
             # Cache to history immediately (before preprocessing which may OOM)
-            self._save_to_history()
+            self._save_batch_data(batch)
 
         # ── 4. Preprocess (runs as subprocess) ─────────────────────
         with vram_stage("preprocessing"):
