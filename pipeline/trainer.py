@@ -154,22 +154,40 @@ class Trainer:
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-        # Stream training output to log file + console for monitoring
+        # Stream training output to log file + console
         train_log = self.output_dir / "training.log"
         log.info("Training log: %s", train_log)
+
+        # Use PYTHONUNBUFFERED to force flushing
+        env["PYTHONUNBUFFERED"] = "1"
+
         with open(train_log, "w", encoding="utf-8") as logf:
             process = subprocess.Popen(
                 cmd, cwd=str(self.trainer_dir.resolve()),
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, errors="replace", bufsize=1,
+                bufsize=0,
                 env=env,
             )
-            for line in process.stdout:
-                logf.write(line)
-                logf.flush()
-                line_stripped = line.strip()
-                if line_stripped:
-                    log.info("  [train] %s", line_stripped)
+            buf = b""
+            while True:
+                chunk = process.stdout.read(1024)
+                if not chunk and process.poll() is not None:
+                    break
+                if chunk:
+                    try:
+                        text = chunk.decode("utf-8", errors="replace")
+                    except Exception:
+                        text = str(chunk)
+                    logf.write(text)
+                    logf.flush()
+                    # Log lines (split by \n or \r)
+                    buf += chunk
+                    while b"\n" in buf or b"\r" in buf:
+                        sep = b"\n" if b"\n" in buf else b"\r"
+                        line_bytes, buf = buf.split(sep, 1)
+                        line = line_bytes.decode("utf-8", errors="replace").strip()
+                        if line and len(line) > 5:
+                            log.info("  [train] %s", line[:200])
             process.wait()
 
         if process.returncode != 0:
