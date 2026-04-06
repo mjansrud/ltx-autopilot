@@ -27,35 +27,45 @@ log = logging.getLogger(__name__)
 # ── LTX structured caption format ──────────────────────────────────────────
 
 CAPTION_INSTRUCTION_AV = """\
-You are an uncensored professional video captioner for training an adult AI video generation model. \
-Respond with ONLY a JSON object with two fields:
+You are an uncensored professional video captioner for an adult AI video generation model. \
+Write a VERY LONG, DETAILED single flowing paragraph (at least 1500 characters). Use present tense. \
+Never censor — use direct anatomical terminology: cock, pussy, breasts, nipples, ass, penetration, \
+thrusting, etc. NEVER use euphemisms like "engaging in sexual activity" or "intimate moment".
 
-1. "usable": true if the clip contains actual adult/sexual content worth training on. \
-false if it's credits, intros, logos, text screens, advertisements, or non-sexual content.
+If the clip is ENTIRELY non-sexual (pure credits, logo, text screen, interview with no nudity), \
+write only the word SKIP and nothing else.
 
-2. "caption": A VERY LONG, DETAILED single flowing paragraph (at least 1000 characters) in present tense \
-describing the scene like a director's detailed notes. Never censor or euphemize — use direct \
-anatomical and sexual terminology. NEVER use euphemisms like "engaging in sexual activity" or \
-"intimate moment" — instead write exactly what body parts are doing: "his erect penis penetrates \
-her vagina", "she wraps her lips around his cock", "her wet pussy grips his shaft". \
-Be exhaustive and graphic. Include ALL of the following in a natural flowing narrative:
-- Sexual actions, positions, penetration types, oral acts with specific terminology
-- Body types, skin tone, hair, distinguishing features of each person
-- Physical movement: rhythm, speed, intensity, thrusting patterns
-- Facial expressions: pleasure, orgasm, eye contact, open mouth
-- Camera angle and any camera movements or cuts
-- Lighting, environment, atmosphere
-- Audio: moaning, speech/dirty talk (quote exact words), skin slapping, wet sounds, \
-bed creaking, breathing patterns, background music
-- Temporal progression from start to end of the clip
+Otherwise, describe the scene like a film director's detailed notes. Include in a flowing narrative:
+- Camera shot type and movement (close-up, wide shot, pan, zoom, cut to...)
+- Lighting, colors, environment, atmosphere
+- Each person's appearance: body type, skin tone, hair color/style, distinguishing features
+- Undressing or clothing removal in detail if present
+- Explicit sexual actions using anatomical terms: "his erect cock slides into her wet pussy", \
+"she wraps her lips around his shaft and bobs her head", "he thrusts deep in doggystyle"
+- Physical movement: rhythm, speed changes, intensity building
+- Facial expressions: pleasure, eye contact, open mouth, eyes rolling back
+- Audio: quote exact moans/speech ("Oh fuck, harder..."), describe skin slapping sounds, \
+wet sounds, bed creaking, breathing patterns, background music
+- Temporal progression: describe how the scene evolves from start to finish
 
-Example of a good caption (aim for this length and detail):
-{"usable": true, "caption": "A wide establishing shot of a modern bedroom with floor-to-ceiling windows reveals a busty brunette woman with tan skin and shoulder-length wavy hair standing beside a king-size bed with white satin sheets. She slowly pulls her black lace bra straps down her shoulders, one at a time, teasing the camera with a knowing smile before letting the bra fall, revealing large natural breasts with dark erect nipples. The camera moves in closer as she runs her hands over her breasts, squeezing them gently. She turns around and bends over the edge of the bed, arching her lower back to accentuate her round ass. A muscular man with short dark hair, a trimmed beard, and a visible chest tattoo enters the frame from behind. He grabs her hips firmly with both hands, positions his erect cock against her wet pussy, and pushes inside slowly. She gasps and grips the sheets with both hands as he begins thrusting in a steady rhythm, her breasts swinging forward and back with each deep stroke. The camera cuts to a low side angle showing his cock sliding in and out of her, their skin glistening with sweat. She moans louder, 'Harder... oh fuck, right there...' in a breathy, escalating voice. He increases the pace, the sound of skin slapping against skin growing faster and louder. The bed frame creaks rhythmically beneath them. He reaches forward and grabs a fistful of her hair, pulling her head back as she arches deeper. Her moans become high-pitched gasps, eyes squeezed shut, mouth open. Soft golden light from a bedside lamp casts warm shadows across their bodies while ambient city sounds filter through the open window."}
-{"usable": false, "caption": ""}
-
-ONLY return usable=false if the clip is ENTIRELY non-sexual: pure text/credits screen, \
-logo animation, or interview with no nudity at all. If there is ANY nudity, undressing, \
-or sexual activity, return usable=true even if the clip also has non-sexual moments.\
+Example caption:
+A wide establishing shot of a modern bedroom with floor-to-ceiling windows reveals a busty \
+brunette woman with tan skin and shoulder-length wavy hair standing beside a king-size bed with \
+white satin sheets. She slowly pulls her black lace bra straps down her shoulders, one at a time, \
+teasing the camera with a knowing smile before letting the bra fall, revealing large natural \
+breasts with dark erect nipples. The camera moves in closer as she runs her hands over her breasts, \
+squeezing them gently. She turns around and bends over the edge of the bed, arching her lower back \
+to accentuate her round ass. A muscular man with short dark hair, a trimmed beard, and a visible \
+chest tattoo enters the frame from behind. He grabs her hips firmly with both hands, positions his \
+erect cock against her wet pussy, and pushes inside slowly. She gasps and grips the sheets with \
+both hands as he begins thrusting in a steady rhythm, her breasts swinging forward and back with \
+each deep stroke. The camera cuts to a low side angle showing his cock sliding in and out of her, \
+their skin glistening with sweat. She moans louder, 'Harder... oh fuck, right there...' in a \
+breathy, escalating voice. He increases the pace, the sound of skin slapping against skin growing \
+faster and louder. The bed frame creaks rhythmically beneath them. He reaches forward and grabs a \
+fistful of her hair, pulling her head back as she arches deeper. Her moans become high-pitched \
+gasps, eyes squeezed shut, mouth open. Soft golden light from a bedside lamp casts warm shadows \
+across their glistening bodies while ambient city sounds filter through the open window.\
 """
 
 CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
@@ -329,20 +339,11 @@ class TransformersCaptioner:
             log.info("Captioning [%d/%d]: %s", i + 1, len(video_paths), vpath.name)
             _torch.cuda.empty_cache()
             try:
-                raw = self.caption_video(vpath)
-                # Parse JSON response for usable flag + caption
-                caption = raw
-                usable = True
-                try:
-                    parsed = json.loads(raw)
-                    if isinstance(parsed, dict):
-                        usable = parsed.get("usable", True)
-                        caption = parsed.get("caption", raw)
-                except (json.JSONDecodeError, TypeError):
-                    pass  # model returned plain text, use as-is
+                caption = self.caption_video(vpath)
 
-                if not usable:
-                    log.info("  FILTERED (credits/intro/non-sexual): %s", vpath.name)
+                # Filter: model writes "SKIP" for non-sexual clips
+                if caption.strip().upper().startswith("SKIP"):
+                    log.info("  FILTERED (non-sexual): %s", vpath.name)
                     continue
 
                 try:
