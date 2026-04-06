@@ -34,7 +34,7 @@ class PipelineOrchestrator:
         self.config_path = Path(config_path)
         self.cfg = yaml.safe_load(self.config_path.read_text())
 
-        self.work_dir = Path("./workspace/current")
+        self.work_dir = None  # set per-batch in run_batch
         self.state = PipelineState(self.cfg["state_file"])
 
         # Lustpress server
@@ -68,9 +68,9 @@ class PipelineOrchestrator:
     def _restore_from_batch_dir(self, scenes_dir: Path, metadata_file: Path) -> list[Path] | None:
         """Restore scenes + captions from batch dir (crash recovery)."""
         batch = self.state.batch_num
-        batch_data = Path("./workspace") / f"batch-{batch:04d}" / "data"
-        batch_scenes = batch_data / "scenes"
-        batch_captions = batch_data / "metadata.jsonl"
+        batch_dir = Path("./workspace") / f"batch-{batch:04d}"
+        batch_scenes = batch_dir / "scenes"
+        batch_captions = batch_dir / "metadata.jsonl"
 
         if not batch_scenes.exists() or not batch_captions.exists():
             return None
@@ -130,7 +130,7 @@ class PipelineOrchestrator:
 
     def _start_prefetch(self, batch_num: int):
         """Start prefetching next batch in background thread."""
-        next_work = Path(f"./workspace/prefetch")
+        next_work = Path(f"./workspace/batch-{batch_num:04d}")
         if next_work.exists():
             shutil.rmtree(next_work, ignore_errors=True)
         self._prefetch_future = self._prefetch_executor.submit(self._prefetch_batch, batch_num, next_work)
@@ -148,9 +148,12 @@ class PipelineOrchestrator:
             return None
 
     def _cleanup(self):
-        """Delete working dir (batch data already saved by _save_batch_data)."""
-        if self.work_dir.exists():
-            shutil.rmtree(self.work_dir, ignore_errors=True)
+        """Delete large temporary files, keep scenes + captions + checkpoints."""
+        if self.work_dir:
+            for d in ["raw", "precomputed"]:
+                p = self.work_dir / d
+                if p.exists():
+                    shutil.rmtree(p, ignore_errors=True)
 
         # Prune old batch data if total exceeds limit
         cleanup_cfg = self.cfg.get("cleanup", {})
@@ -212,8 +215,9 @@ class PipelineOrchestrator:
           5. Evaluate            — inference pipeline loaded then unloaded (subprocess)
           6. Cleanup             — free disk
         """
-        self._ensure_work_dir()
         batch = self.state.batch_num
+        self.work_dir = Path(f"./workspace/batch-{batch:04d}")
+        self._ensure_work_dir()
         raw_dir = self.work_dir / "raw"
         scenes_dir = self.work_dir / "scenes"
         precomputed_dir = self.work_dir / "precomputed"
@@ -233,18 +237,11 @@ class PipelineOrchestrator:
         if cached:
             scene_videos = cached
             videos = cached
-            log.info("[1-3/6] Restored %d clips from history (skip download+split+caption)", len(cached))
+            log.info("[1-3/6] Restored %d clips from batch dir (crash recovery)", len(cached))
             dash.show_scene_split(len(cached), len(cached), scenes_dir)
         elif prefetched and prefetched[0]:
+            # Prefetch already wrote to this batch dir
             videos, scene_videos = prefetched
-            # Move prefetched data into current workspace
-            next_work = Path("./workspace/prefetch")
-            if (next_work / "raw").exists():
-                shutil.copytree(next_work / "raw", raw_dir, dirs_exist_ok=True)
-            if (next_work / "scenes").exists():
-                shutil.copytree(next_work / "scenes", scenes_dir, dirs_exist_ok=True)
-            shutil.rmtree(next_work, ignore_errors=True)
-            # Update paths to point to current workspace
             scene_videos = sorted(scenes_dir.glob("*.mp4")) if scenes_dir.exists() else sorted(raw_dir.glob("*.mp4"))
             log.info("[1-2/6] Using prefetched data: %d videos, %d scenes", len(videos), len(scene_videos))
             dash.show_scene_split(len(videos), len(scene_videos), scenes_dir if scenes_dir.exists() else raw_dir)
@@ -283,7 +280,7 @@ class PipelineOrchestrator:
                 dash.show_captions(metadata_file)
 
             # Cache to history immediately (before preprocessing which may OOM)
-            self._save_batch_data(batch)
+            pass  # data already in batch dir
 
         # ── 4. Preprocess (runs as subprocess) ─────────────────────
         with vram_stage("preprocessing"):
