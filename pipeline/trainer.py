@@ -154,44 +154,27 @@ class Trainer:
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
 
-        # Stream training output to log file + console
+        # Stream training output to log file (non-blocking)
         train_log = self.output_dir / "training.log"
         log.info("Training log: %s", train_log)
-
-        # Use PYTHONUNBUFFERED to force flushing
         env["PYTHONUNBUFFERED"] = "1"
 
         with open(train_log, "w", encoding="utf-8") as logf:
-            process = subprocess.Popen(
+            result = subprocess.run(
                 cmd, cwd=str(self.trainer_dir.resolve()),
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                bufsize=0,
+                stdout=logf, stderr=subprocess.STDOUT,
                 env=env,
             )
-            buf = b""
-            while True:
-                chunk = process.stdout.read(1024)
-                if not chunk and process.poll() is not None:
-                    break
-                if chunk:
-                    try:
-                        text = chunk.decode("utf-8", errors="replace")
-                    except Exception:
-                        text = str(chunk)
-                    logf.write(text)
-                    logf.flush()
-                    # Log lines (split by \n or \r)
-                    buf += chunk
-                    while b"\n" in buf or b"\r" in buf:
-                        sep = b"\n" if b"\n" in buf else b"\r"
-                        line_bytes, buf = buf.split(sep, 1)
-                        line = line_bytes.decode("utf-8", errors="replace").strip()
-                        if line and len(line) > 5:
-                            log.info("  [train] %s", line[:200])
-            process.wait()
 
-        if process.returncode != 0:
-            raise RuntimeError(f"Training failed with exit code {process.returncode}")
+        if result.returncode != 0:
+            # Log last 30 lines of training log for debugging
+            try:
+                lines = train_log.read_text(encoding="utf-8", errors="replace").splitlines()
+                for line in lines[-30:]:
+                    log.error("  [train] %s", line.strip()[:200])
+            except Exception:
+                pass
+            raise RuntimeError(f"Training failed with exit code {result.returncode}")
 
         checkpoint = self.find_latest_checkpoint()
         log.info("Training complete. Latest checkpoint: %s", checkpoint)
