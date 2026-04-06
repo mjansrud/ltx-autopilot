@@ -188,8 +188,7 @@ class TransformersCaptioner:
                     device_map="auto",
                     trust_remote_code=True,
                 )
-                if "Omni" in auto_cls_name:
-                    load_kwargs["max_memory"] = {0: "28GiB", "cpu": "40GiB"}
+                # Omni max_memory not needed with 4-bit (6.6GB vs 20GB bf16)
 
                 self.model = cls.from_pretrained(self.model_id, **load_kwargs)
                 model_loaded = True
