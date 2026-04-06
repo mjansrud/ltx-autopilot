@@ -66,8 +66,23 @@ class PipelineOrchestrator:
         self.work_dir.mkdir(parents=True, exist_ok=True)
 
     def _restore_from_cache(self, scenes_dir: Path, metadata_file: Path) -> list[Path] | None:
-        """Try to restore scenes + captions from cache. Returns scene clips if found."""
+        """Restore scenes + captions from cache for crash recovery (same batch only)."""
         cache_dir = Path("./workspace/history")
+        cache_batch_file = cache_dir / "batch_num.txt"
+
+        # Only restore if cache is from the SAME batch (crash recovery)
+        if not cache_batch_file.exists():
+            return None
+        try:
+            cached_batch = int(cache_batch_file.read_text().strip())
+        except (ValueError, OSError):
+            return None
+        if cached_batch != self.state.batch_num:
+            # Different batch — clear stale cache
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir, ignore_errors=True)
+            return None
+
         cache_scenes = cache_dir / "scenes"
         cache_captions = cache_dir / "captions.jsonl"
 
@@ -90,18 +105,15 @@ class PipelineOrchestrator:
         for line in cache_captions.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 entry = json.loads(line)
-                # Key by filename
                 name = Path(entry["media_path"]).name
                 captioned[name] = entry
 
-        # Write metadata for clips we have captions for
         scene_clips = sorted(scenes_dir.glob("*.mp4"))
         matched = []
         with open(metadata_file, "w", encoding="utf-8") as f:
             for clip in scene_clips:
                 if clip.name in captioned:
                     entry = captioned[clip.name]
-                    # Update path to be relative to workspace
                     entry["media_path"] = str(clip.relative_to(self.work_dir))
                     f.write(json.dumps(entry, ensure_ascii=False) + "\n")
                     matched.append(clip)
@@ -166,9 +178,15 @@ class PipelineOrchestrator:
         dash.show_cleanup(False)
 
     def _save_to_history(self):
-        """Cache scenes + captions to history right after captioning."""
+        """Cache scenes + captions for crash recovery (tagged with batch number)."""
         history = Path("./workspace/history")
+        # Clear previous batch's cache
+        if history.exists():
+            shutil.rmtree(history, ignore_errors=True)
         history.mkdir(parents=True, exist_ok=True)
+
+        # Tag with current batch number
+        (history / "batch_num.txt").write_text(str(self.state.batch_num))
 
         for subdir in ["scenes"]:
             src = self.work_dir / subdir
@@ -176,15 +194,11 @@ class PipelineOrchestrator:
                 dst = history / subdir
                 dst.mkdir(exist_ok=True)
                 for f in src.glob("*.mp4"):
-                    target = dst / f.name
-                    if not target.exists():
-                        shutil.copy2(f, target)
+                    shutil.copy2(f, dst / f.name)
 
         meta_src = self.work_dir / "metadata.jsonl"
         if meta_src.exists():
-            cache_meta = history / "captions.jsonl"
-            with open(cache_meta, "a", encoding="utf-8") as out:
-                out.write(meta_src.read_text(encoding="utf-8"))
+            shutil.copy2(meta_src, history / "captions.jsonl")
 
         log.info("[HISTORY] Cached scenes + captions")
 
