@@ -311,7 +311,7 @@ class PipelineOrchestrator:
 
         # ── Save I2V reference frames for NEXT batch's eval ────────
         # (using current batch's frames for next batch = unseen data)
-        i2v_dir = Path("./evaluations/i2v_refs")
+        i2v_dir = self.work_dir / "i2v_refs"
         i2v_dir.mkdir(parents=True, exist_ok=True)
         next_refs_file = i2v_dir / "pending_refs.json"
         try:
@@ -410,7 +410,7 @@ class PipelineOrchestrator:
             log.warning("inference.py not found, skipping I2V eval")
             return
 
-        eval_dir = Path("./workspace/evaluations") / f"i2v_batch{batch:04d}_step{total_steps:06d}"
+        eval_dir = self.work_dir / f"i2v_step{total_steps:06d}"
         eval_dir.mkdir(parents=True, exist_ok=True)
 
         model_path = self.cfg["training"]["model_checkpoint"]

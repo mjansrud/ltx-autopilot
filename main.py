@@ -56,7 +56,7 @@ def main():
     max_batches = 1 if args.batch_once else args.max_batches
 
     # Save PID for clean shutdown (stop.sh)
-    pid_file = Path("workspace/current/.pid")
+    pid_file = Path("workspace/.pid")
     pid_file.parent.mkdir(parents=True, exist_ok=True)
     pid_file.write_text(str(os.getpid()))
 
