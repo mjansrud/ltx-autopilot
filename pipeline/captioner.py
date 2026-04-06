@@ -257,8 +257,7 @@ class TransformersCaptioner:
         conversation = [
             {"role": "system", "content": [{"type": "text", "text": "You are a helpful assistant that describes videos in detail."}]},
             {"role": "user", "content": [
-                {"type": "video", "video": str(video_path),
-                 "max_pixels": 360 * 420, "nframes": min(self.max_frames, 16)},
+                {"type": "video", "video": str(video_path)},
                 {"type": "text", "text": instruction},
             ]},
         ]

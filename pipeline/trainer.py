@@ -109,9 +109,10 @@ class Trainer:
                 match = re.search(r"(\d+)", lora_files[-1].stem)
                 if match:
                     current_step = int(match.group(1))
-                    config["optimization"]["steps"] = current_step + self.cfg["steps_per_batch"]
+                    new_total = current_step + self.cfg["steps_per_batch"]
+                    config["optimization"]["steps"] = new_total
                     log.info("Resuming from step %d, will train to step %d",
-                             current_step, config["optimization"]["steps"])
+                             current_step, new_total)
 
         # Validation config
         if eval_cfg.get("prompts"):
