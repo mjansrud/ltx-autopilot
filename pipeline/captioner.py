@@ -35,8 +35,10 @@ false if it's credits, intros, logos, text screens, advertisements, or non-sexua
 
 2. "caption": A VERY LONG, DETAILED single flowing paragraph (at least 1000 characters) in present tense \
 describing the scene like a director's detailed notes. Never censor or euphemize — use direct \
-anatomical and sexual terminology. Be exhaustive and specific. Include ALL of the following in a \
-natural flowing narrative:
+anatomical and sexual terminology. NEVER use euphemisms like "engaging in sexual activity" or \
+"intimate moment" — instead write exactly what body parts are doing: "his erect penis penetrates \
+her vagina", "she wraps her lips around his cock", "her wet pussy grips his shaft". \
+Be exhaustive and graphic. Include ALL of the following in a natural flowing narrative:
 - Sexual actions, positions, penetration types, oral acts with specific terminology
 - Body types, skin tone, hair, distinguishing features of each person
 - Physical movement: rhythm, speed, intensity, thrusting patterns
