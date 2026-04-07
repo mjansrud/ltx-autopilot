@@ -165,20 +165,11 @@ class VideoCrawler:
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _load_seen(self) -> set[str]:
-        seen = set()
-        # Load from seen_videos.txt
+        """Load seen URLs from archive file."""
         path = Path(self.archive_path)
         if path.exists():
-            seen = set(line.strip() for line in path.read_text().splitlines() if line.strip())
-        # Also scan existing downloaded files across all batches to catch
-        # videos from crashed runs that weren't marked as seen
-        for mp4 in Path("./workspace").glob("batch-*/raw/*.mp4"):
-            # Extract video ID from filename (e.g. xnxx_iezyl34.mp4 -> iezyl34)
-            stem = mp4.stem
-            parts = stem.split("_", 1)
-            if len(parts) == 2:
-                seen.add(parts[1])  # Add just the video ID for fuzzy matching
-        return seen
+            return set(line.strip() for line in path.read_text().splitlines() if line.strip())
+        return set()
 
     def _mark_seen(self, url: str):
         with open(self.archive_path, "a") as f:
@@ -239,13 +230,9 @@ class VideoCrawler:
                 link = item.get("link", "")
                 vid_id = item.get("id", "")
 
-                if not link or link in seen or vid_id in seen:
+                if not link or link in seen:
                     continue
 
-                # Skip if we already have a video from this uploader
-                uploader = (item.get("uploader") or item.get("author") or item.get("channel") or "").lower()
-                if uploader and any(c.get("uploader") == uploader for c in candidates):
-                    continue
 
                 # Duration filtering
                 dur = self._parse_duration_seconds(item.get("duration", ""))
@@ -313,6 +300,7 @@ class VideoCrawler:
             "--socket-timeout", "30",
             "--max-filesize", "100m",
             "--match-filter", f"duration>={self.min_dur} & duration<={self.max_dur}",
+            "--download-archive", str(Path(self.archive_path).resolve()),
         ]
 
         log.info("  Downloading: %s [%s]", item["title"][:60], item["source"])
