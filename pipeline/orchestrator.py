@@ -182,8 +182,32 @@ class PipelineOrchestrator:
         log.info("[PREFETCH-CAPTION] Captioning %d prefetched clips for batch %d", len(clips), next_batch_num)
         self.captioner.caption_batch(clips, next_meta)
 
+    @staticmethod
+    def _extract_mid_frame(clip_path):
+        """Extract a frame from the middle of a clip (avoids intro/outro cards).
+
+        Returns frame_bgr or None.
+        """
+        import cv2
+
+        cap = cv2.VideoCapture(str(clip_path))
+        if not cap.isOpened():
+            return None
+
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        # Seek to ~30% into the clip (past any intro card, before outro)
+        target = max(1, int(total * 0.30))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, target)
+        ret, frame = cap.read()
+        cap.release()
+        return frame if ret else None
+
     def _generate_i2v_refs(self, batch_num: int):
-        """Generate i2v refs from NEXT batch's captioned clips (unseen data)."""
+        """Generate i2v refs from NEXT batch's captioned clips (unseen data).
+
+        Only clips that passed Omni's SKIP filter (have captions) are eligible.
+        Extracts a mid-clip frame to avoid title cards / ad screens at start/end.
+        """
         import cv2, random
 
         next_batch_dir = Path(f"./workspace/batch-{batch_num + 1:04d}")
@@ -201,20 +225,22 @@ class PipelineOrchestrator:
             log.info("[I2V] Not enough clips for i2v (%d)", len(entries))
             return
 
-        picks = random.sample(entries, 2)
+        # Shuffle and pick 2 — all entries already passed Omni SKIP filter
+        random.shuffle(entries)
         i2v_refs = []
         i2v_dir = self.work_dir / "i2v_refs"
         i2v_dir.mkdir(parents=True, exist_ok=True)
 
-        for entry in picks:
+        for entry in entries:
+            if len(i2v_refs) >= 2:
+                break
             clip_path = Path(entry["media_path"])
             if not clip_path.is_absolute():
                 clip_path = next_batch_dir / clip_path
 
-            cap = cv2.VideoCapture(str(clip_path))
-            ret, frame = cap.read()
-            cap.release()
-            if not ret:
+            frame = self._extract_mid_frame(clip_path)
+            if frame is None:
+                log.debug("[I2V] No valid frame from %s", clip_path.name)
                 continue
 
             img_path = i2v_dir / f"{clip_path.stem}.png"
@@ -225,7 +251,23 @@ class PipelineOrchestrator:
         if i2v_refs:
             refs_file = self.work_dir / "i2v_refs.json"
             refs_file.write_text(json.dumps(i2v_refs, ensure_ascii=False), encoding="utf-8")
+            self._copy_i2v_to_canonical(i2v_refs)
             log.info("[I2V] Saved %d refs for validation", len(i2v_refs))
+
+    def _copy_i2v_to_canonical(self, i2v_refs: list[dict]):
+        """Copy i2v refs to workspace i2v/ dir with metadata.jsonl."""
+        i2v_out = self.work_dir / "i2v"
+        i2v_out.mkdir(parents=True, exist_ok=True)
+        meta_lines = []
+        for ref in i2v_refs:
+            src = Path(ref["image"])
+            dst = i2v_out / src.name
+            if src.exists():
+                shutil.copy2(src, dst)
+            meta_lines.append(json.dumps({"image": str(dst.resolve()), "prompt": ref["prompt"]}, ensure_ascii=False))
+        meta_file = i2v_out / "metadata.jsonl"
+        meta_file.write_text("\n".join(meta_lines) + "\n", encoding="utf-8")
+        log.info("[I2V] Copied %d refs to %s", len(i2v_refs), i2v_out)
 
     def _save_batch_data(self, batch_num: int):
         """Save scenes + captions into batch dir for recovery + archival."""
@@ -407,16 +449,20 @@ class PipelineOrchestrator:
 
             clips = sorted(scenes_dir.glob("*.mp4")) if scenes_dir.exists() else []
             pending = []
-            for clip in clips[:2]:
-                cap = cv2.VideoCapture(str(clip))
-                ret, frame = cap.read()
-                cap.release()
-                if ret:
-                    img_path = i2v_dir / f"batch{batch:04d}_{clip.stem}.png"
-                    cv2.imwrite(str(img_path), frame)
-                    caption = captions_by_path.get(clip.name, "")
-                    if caption:
-                        pending.append({"image": str(img_path.resolve()), "prompt": caption})
+            for clip in clips:
+                if len(pending) >= 2:
+                    break
+                caption = captions_by_path.get(clip.name, "")
+                if not caption:
+                    continue  # No caption = Omni SKIP'd it
+                frame = self._extract_mid_frame(clip)
+                if frame is None:
+                    log.debug("[I2V] No valid frame from %s, skipping", clip.name)
+                    continue
+                img_path = i2v_dir / f"batch{batch:04d}_{clip.stem}.png"
+                cv2.imwrite(str(img_path), frame)
+                pending.append({"image": str(img_path.resolve()), "prompt": caption})
+                log.info("[I2V] Pending ref: %s", clip.name)
             # Save for next batch to pick up
             next_refs_file.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
             log.info("Saved %d I2V refs for next batch's eval", len(pending))

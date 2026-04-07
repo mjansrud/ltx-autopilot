@@ -151,6 +151,7 @@ class Trainer:
     def train(self, precomputed_dir: Path, resume_from: str | None = None, batch_num: int = 0, i2v_refs: list[dict] | None = None) -> str | None:
         """
         Run training for one batch. Returns path to latest checkpoint after training.
+        Retries up to 3 times on crash (exit code 3221225477 = Windows access violation).
         """
         log_vram("training — start")
 
@@ -170,7 +171,6 @@ class Trainer:
             raise FileNotFoundError(f"LTX train.py not found at {script}")
 
         import sys, os
-        # Use the main venv's python (torch 2.11+cu128 for RTX 5090 compatibility)
         ltx_python = sys.executable
 
         cmd = [
@@ -178,59 +178,99 @@ class Trainer:
             str(batch_config.resolve()),
         ]
 
-        log.info("Starting training: %d steps", self.cfg["steps_per_batch"])
-        log.info("Command: %s", " ".join(cmd))
-
         # Scripts dir on PYTHONPATH for sibling imports
         env = os.environ.copy()
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
-        # Ensure ninja is on PATH for quanto int4 CUDA kernel compilation
         venv_scripts = str(Path(sys.executable).parent)
         env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
-
-        # Training output goes directly to terminal (progress.jsonl tracks steps)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
-        progress_file = (batch_dir or self.output_dir) / "progress.jsonl"
-        log.info("Training progress: %s", progress_file)
 
-        # Tail progress.jsonl in background thread to show steps in terminal
-        import threading, json as _json, time as _time
-        _stop_tail = threading.Event()
-        def _tail_progress():
-            seen = 0
-            while not _stop_tail.is_set():
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            # Force VRAM cleanup before spawning training subprocess
+            import gc, torch
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+                torch.cuda.empty_cache()
+                torch.cuda.ipc_collect()
+                torch.cuda.reset_peak_memory_stats()
+                gc.collect()
+                torch.cuda.empty_cache()
+
+            reserved_mb = torch.cuda.memory_reserved() // 1024**2 if torch.cuda.is_available() else 0
+            alloc_mb = torch.cuda.memory_allocated() // 1024**2 if torch.cuda.is_available() else 0
+            log.info("VRAM before training (attempt %d/%d): %d MB allocated, %d MB reserved",
+                     attempt, max_retries, alloc_mb, reserved_mb)
+            log.info("Starting training: %d steps", self.cfg["steps_per_batch"])
+            log.info("Command: %s", " ".join(cmd))
+
+            progress_file = batch_dir / "progress.jsonl"
+            log.info("Training progress: %s", progress_file)
+
+            # Tail progress.jsonl in background thread
+            import threading, json as _json, time as _time
+            _stop_tail = threading.Event()
+            def _tail_progress():
+                seen = 0
+                while not _stop_tail.is_set():
+                    try:
+                        lines = progress_file.read_text(encoding="utf-8").splitlines()
+                        for line in lines[seen:]:
+                            d = _json.loads(line)
+                            log.info("[step %d/%d] loss=%.4f lr=%.6f time=%.1fs",
+                                     d["step"], d["total_steps"], d["loss"], d["lr"], d["step_time"])
+                        seen = len(lines)
+                    except Exception:
+                        pass
+                    _stop_tail.wait(5)
+            tail_thread = threading.Thread(target=_tail_progress, daemon=True)
+            tail_thread.start()
+
+            # Capture stderr to log crashes while still showing stdout in terminal
+            result = subprocess.run(
+                cmd, cwd=str(self.trainer_dir.resolve()),
+                stdout=None, stderr=subprocess.PIPE,
+                env=env,
+            )
+            _stop_tail.set()
+            tail_thread.join(timeout=2)
+
+            if result.returncode == 0:
+                break  # Success
+
+            # Log stderr from crash
+            stderr_text = ""
+            if result.stderr:
                 try:
-                    lines = progress_file.read_text(encoding="utf-8").splitlines()
-                    for line in lines[seen:]:
-                        d = _json.loads(line)
-                        log.info("[step %d/%d] loss=%.4f lr=%.6f time=%.1fs",
-                                 d["step"], d["total_steps"], d["loss"], d["lr"], d["step_time"])
-                    seen = len(lines)
+                    stderr_text = result.stderr.decode("utf-8", errors="replace")
                 except Exception:
-                    pass
-                _stop_tail.wait(5)
-        tail_thread = threading.Thread(target=_tail_progress, daemon=True)
-        tail_thread.start()
+                    stderr_text = str(result.stderr)
+                for line in stderr_text.strip().splitlines()[-30:]:
+                    log.error("  [train stderr] %s", line.strip()[:200])
 
-        result = subprocess.run(
-            cmd, cwd=str(self.trainer_dir.resolve()),
-            stdout=None, stderr=None,  # inherit terminal
-            env=env,
-        )
-        _stop_tail.set()
-        tail_thread.join(timeout=2)
-
-        if result.returncode != 0:
-            # Log last 30 lines of training log for debugging
-            try:
-                lines = train_log.read_text(encoding="utf-8", errors="replace").splitlines()
-                for line in lines[-30:]:
-                    log.error("  [train] %s", line.strip()[:200])
-            except Exception:
-                pass
-            raise RuntimeError(f"Training failed with exit code {result.returncode}")
+            is_segfault = result.returncode in (-11, 3221225477, -1073741819)
+            if is_segfault and attempt < max_retries:
+                wait = 10 * attempt
+                log.warning("Training crashed (exit %d, attempt %d/%d). "
+                            "Retrying in %ds after VRAM cleanup...",
+                            result.returncode, attempt, max_retries, wait)
+                # Extra aggressive cleanup between retries
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+                    torch.cuda.empty_cache()
+                    torch.cuda.ipc_collect()
+                _time.sleep(wait)
+                continue
+            else:
+                raise RuntimeError(
+                    f"Training failed with exit code {result.returncode} "
+                    f"(attempt {attempt}/{max_retries})"
+                    + (f"\nLast stderr:\n{stderr_text[-500:]}" if stderr_text else "")
+                )
 
         checkpoint = self.find_latest_checkpoint()
         log.info("Training complete. Latest checkpoint: %s", checkpoint)

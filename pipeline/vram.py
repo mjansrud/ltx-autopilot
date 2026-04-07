@@ -37,8 +37,13 @@ def flush_vram():
     """Aggressively free GPU memory."""
     gc.collect()
     if torch.cuda.is_available():
+        torch.cuda.synchronize()
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
+        torch.cuda.reset_peak_memory_stats()
+        # Force Python to release all cyclic references holding CUDA tensors
+        gc.collect()
+        torch.cuda.empty_cache()
         torch.cuda.synchronize()
     gc.collect()
 
