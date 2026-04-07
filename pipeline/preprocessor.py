@@ -67,10 +67,13 @@ class Preprocessor:
 
         # The LTX scripts import sibling modules (decode_latents, process_captions, etc.)
         # so the scripts directory must be on PYTHONPATH
-        import os
+        import os, sys
         env = os.environ.copy()
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
+        # Force the correct venv — cwd inside LTX-2/ would otherwise pick up LTX-2/.venv
+        venv_root = str(Path(sys.executable).parent.parent.resolve())
+        env["VIRTUAL_ENV"] = venv_root
 
         result = subprocess.run(
             cmd, cwd=str(self.trainer_dir.resolve()),

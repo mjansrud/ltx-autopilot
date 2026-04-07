@@ -190,26 +190,16 @@ class TransformersCaptioner:
         log_vram("captioner load — after")
 
     def unload(self):
-        """Fully remove model from GPU — aggressive cleanup for VRAM release."""
-        import torch
+        """Fully remove model from GPU."""
         log.info("Unloading captioner model...")
         if self.model is not None:
-            # Delete all parameter tensors explicitly (4-bit models can't .cpu())
-            try:
-                for param in self.model.parameters():
-                    param.data = torch.empty(0)
-            except Exception:
-                pass
             try:
                 self.model.cpu()
             except Exception:
                 pass
-            del self.model
-        if self.processor is not None:
-            del self.processor
+        unload_model(self.model, self.processor)
         self.model = None
         self.processor = None
-        # Double flush — first gc to break cycles, then empty cache
         flush_vram()
         log_vram("captioner unload — after")
 

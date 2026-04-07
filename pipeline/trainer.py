@@ -184,6 +184,9 @@ class Trainer:
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
         venv_scripts = str(Path(sys.executable).parent)
         env["PATH"] = venv_scripts + os.pathsep + env.get("PATH", "")
+        # Force the correct venv — cwd inside LTX-2/ would otherwise pick up LTX-2/.venv
+        venv_root = str(Path(sys.executable).parent.parent.resolve())
+        env["VIRTUAL_ENV"] = venv_root
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
 
