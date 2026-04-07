@@ -377,7 +377,8 @@ class PipelineOrchestrator:
 
         with vram_stage("training"):
             steps = self.cfg["training"]["steps_per_batch"]
-            resume_from = self.state.last_checkpoint
+            # Use latest checkpoint from disk (more reliable than state after crashes)
+            resume_from = self.trainer.find_latest_checkpoint() or self.state.last_checkpoint
             dash.show_training_start(steps, resume_from)
 
             log.info("[5/6] Training for %d steps...", steps)
