@@ -117,11 +117,13 @@ class Trainer:
             w = eval_cfg.get("width", 576)
             h = eval_cfg.get("height", 576)
             f = eval_cfg.get("num_frames", 49)
-            prompts = list(eval_cfg["prompts"])
-            # Add i2v ref captions as extra t2v prompts (tests if model learned the content)
-            if i2v_refs:
-                for ref in i2v_refs[:2]:
-                    prompts.append(ref["prompt"])
+            # Use i2v refs if available (all prompts must have images), else t2v
+            if i2v_refs and len(i2v_refs) >= 2:
+                prompts = [ref["prompt"] for ref in i2v_refs[:2]]
+                images = [ref["image"] for ref in i2v_refs[:2]]
+            else:
+                prompts = list(eval_cfg["prompts"])
+                images = None
             config["validation"] = {
                 "prompts": prompts,
                 "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
@@ -138,6 +140,8 @@ class Trainer:
                 "generate_audio": True,
                 "skip_initial_validation": True,
             }
+            if images:
+                config["validation"]["images"] = images
 
         batch_config_path.parent.mkdir(parents=True, exist_ok=True)
         batch_config_path.write_text(yaml.dump(config, default_flow_style=False))
