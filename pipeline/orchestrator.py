@@ -44,9 +44,9 @@ class PipelineOrchestrator:
         self.lustpress = LustpressServer(lustpress_dir, lustpress_port)
 
         # Initialize components (no models loaded yet)
+        self.captioner = create_captioner(self.cfg["captioner"])
         self.crawler = VideoCrawler(self.cfg["crawler"], self.lustpress, captioner=self.captioner)
         self.scene_splitter = SceneSplitter(self.cfg.get("scene_split", {}), self.cfg["ltx_trainer_dir"])
-        self.captioner = create_captioner(self.cfg["captioner"])
         self.preprocessor = Preprocessor(self.cfg["preprocessing"], self.cfg["training"], self.cfg["ltx_trainer_dir"])
 
         # Pass eval config into trainer so it can inject validation into the training YAML
