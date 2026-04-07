@@ -164,6 +164,67 @@ class VideoCrawler:
         self.use_random = config.get("include_random", True)
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
+    def _generate_query(self, batch_num: int) -> str:
+        """Use an LLM to generate a diverse, creative search query."""
+        import random
+
+        # Track recently used queries to avoid repetition
+        history_file = Path(self.archive_path).parent / "query_history.txt"
+        recent = []
+        if history_file.exists():
+            recent = history_file.read_text().strip().splitlines()[-20:]  # last 20 queries
+
+        # Build prompt with user's style preferences from config
+        style_hints = "\n".join(f"- {q}" for q in self.queries[:10])
+        prompt = (
+            "Generate a single short adult video search query (3-6 words) for finding diverse HD porn content. "
+            "The query should work on sites like xvideos/xnxx/redtube. "
+            "Include 'hd' at the end. Focus on HIGH QUALITY, well-lit, professional-looking content.\n\n"
+            "The user's preferred style/themes (for reference, don't copy directly):\n"
+            f"{style_hints}\n\n"
+            "Generate a CREATIVE and SPECIFIC query that fits this style but explores NEW variations. "
+            "Vary across: body types (busty, curvy, petite, thick), ethnicities, positions (cowgirl, doggystyle, "
+            "missionary, standing, prone bone), settings (bedroom, shower, outdoor, office), "
+            "camera angles (pov, close up), and acts. Be specific — avoid generic terms.\n\n"
+        )
+        if recent:
+            prompt += f"AVOID these recent queries (already used):\n" + "\n".join(f"- {q}" for q in recent[-10:]) + "\n\n"
+        prompt += "Reply with ONLY the search query, nothing else."
+
+        # Try OpenAI-compatible local server (Ollama, vLLM, llama.cpp, etc.)
+        try:
+            from openai import OpenAI
+            for base_url in ["http://localhost:11434/v1", "http://localhost:8080/v1", "http://localhost:1234/v1"]:
+                try:
+                    client = OpenAI(base_url=base_url, api_key="none", timeout=10)
+                    resp = client.chat.completions.create(
+                        model="default",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=30,
+                        temperature=1.2,
+                    )
+                    query = resp.choices[0].message.content.strip().strip('"').lower().split("\n")[0]
+                    if query and 5 < len(query) < 60:
+                        with open(history_file, "a") as f:
+                            f.write(query + "\n")
+                        log.info("[QUERY-GEN] LLM generated: '%s'", query)
+                        return query
+                except Exception:
+                    continue
+        except ImportError:
+            pass
+
+        # Fallback: random from config + random modifiers for variety
+        base = random.choice(self.queries)
+        modifiers = ["pov", "amateur", "professional", "close up", "passionate",
+                     "rough", "sensual", "outdoor", "homemade", "casting"]
+        modifier = random.choice(modifiers)
+        query = f"{base} {modifier}".replace(" hd ", " ").rstrip(" hd") + " hd"
+        log.info("[QUERY-GEN] Fallback: '%s'", query)
+        with open(history_file, "a") as f:
+            f.write(query + "\n")
+        return query
+
     def _load_seen(self) -> set[str]:
         """Load seen URLs from archive file."""
         path = Path(self.archive_path)
@@ -212,8 +273,8 @@ class VideoCrawler:
         seen = self._load_seen()
         candidates = []
 
-        # Pick a random query (not tied to batch number — avoids same query on restarts)
-        query = random.choice(self.queries)
+        # Generate a dynamic search query using an LLM for maximum diversity
+        query = self._generate_query(batch_num)
 
         # Randomize page and sort to get diverse results from millions of videos
         page = random.randint(1, 100)
