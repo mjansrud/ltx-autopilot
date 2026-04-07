@@ -442,54 +442,8 @@ class PipelineOrchestrator:
         steps_this_batch = self.cfg["training"]["steps_per_batch"]
         self.state.advance_batch(steps_this_batch, checkpoint)
 
-        # ── Save I2V reference frames for NEXT batch's eval ────────
-        # (using current batch's frames for next batch = unseen data)
-        i2v_dir = self.work_dir / "i2v_refs"
-        i2v_dir.mkdir(parents=True, exist_ok=True)
-        next_refs_file = i2v_dir / "pending_refs.json"
-        try:
-            import cv2
-            captions_by_path = {}
-            if metadata_file.exists():
-                for line in metadata_file.read_text(encoding="utf-8").splitlines():
-                    if line.strip():
-                        entry = json.loads(line)
-                        captions_by_path[Path(entry["media_path"]).name] = entry.get("caption", "")
-
-            clips = sorted(scenes_dir.glob("*.mp4")) if scenes_dir.exists() else []
-            pending = []
-            for clip in clips:
-                if len(pending) >= 2:
-                    break
-                caption = captions_by_path.get(clip.name, "")
-                if not caption:
-                    continue  # No caption = Omni SKIP'd it
-                frame = self._extract_mid_frame(clip)
-                if frame is None:
-                    log.debug("[I2V] No valid frame from %s, skipping", clip.name)
-                    continue
-                img_path = i2v_dir / f"batch{batch:04d}_{clip.stem}.png"
-                cv2.imwrite(str(img_path), frame)
-                pending.append({"image": str(img_path.resolve()), "prompt": caption})
-                log.info("[I2V] Pending ref: %s", clip.name)
-            # Save for next batch to pick up
-            next_refs_file.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
-            log.info("Saved %d I2V refs for next batch's eval", len(pending))
-        except Exception as e:
-            log.debug("I2V ref frame save failed: %s", e)
-
-        # ── Load I2V refs from PREVIOUS batch (unseen frames) ─────
-        i2v_refs = []
-        try:
-            prev_batch_dir = Path(f"./workspace/batch-{batch-1:04d}") if batch > 0 else None
-            if prev_batch_dir:
-                # Check prev batch's i2v_refs for pending_refs (saved for us)
-                prev_refs_file = prev_batch_dir / "i2v_refs" / "pending_refs.json"
-                if prev_refs_file.exists():
-                    i2v_refs = json.loads(prev_refs_file.read_text(encoding="utf-8"))
-                    log.info("Loaded %d I2V refs from batch %d", len(i2v_refs), batch - 1)
-        except Exception as e:
-            log.debug("I2V ref load failed: %s", e)
+        # ── I2V refs from i2v_refs.json (generated during captioning from next batch) ──
+        # These are unseen frames from the next batch's clips
 
         # ── 6. Evaluate (MODEL LOADED → UNLOADED) ─────────────────
         eval_cfg = self.cfg.get("evaluation", {})
@@ -514,7 +468,7 @@ class PipelineOrchestrator:
                 eval_dirs = sorted(self.evaluator.output_dir.glob(f"batch{batch:04d}_*"))
                 if eval_dirs:
                     dash.show_evaluation(eval_dirs[-1], eval_cfg.get("prompts", []))
-            # ── I2V eval: use frames from previous batch (unseen) ──
+            # ── I2V eval: use refs from i2v_refs.json (next batch's unseen frames) ──
             if i2v_refs and checkpoint:
                 log.info("[6b/6] Running I2V evaluation with %d unseen reference frames...", len(i2v_refs))
                 self._run_i2v_eval(i2v_refs, checkpoint, batch, new_total)
@@ -522,16 +476,6 @@ class PipelineOrchestrator:
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
                      ((self.state.total_steps // eval_every) + 1) * eval_every if eval_every > 0 else 0)
-
-        # Rotate I2V refs: pending -> prev for next batch
-        try:
-            pending = i2v_dir / "pending_refs.json"
-            prev = i2v_dir / "prev_refs.json"
-            if pending.exists():
-                shutil.copy2(pending, prev)
-                pending.unlink()
-        except Exception:
-            pass
 
         # ── Cleanup ────────────────────────────────────────────────
         videos_count = len(videos)
