@@ -163,6 +163,8 @@ class VideoCrawler:
         self.max_res = config.get("max_resolution", 720)
         self.archive_path = config.get("download_archive", "./state/seen_videos.txt")
         self.use_random = config.get("include_random", True)
+        self.custom_urls = config.get("custom_urls", [])
+        self._config = config  # keep ref for removing consumed URLs
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _generate_query(self, batch_num: int) -> str:
@@ -335,6 +337,19 @@ class VideoCrawler:
                             })
                 except Exception as e:
                     log.debug("Random fetch failed: %s", e)
+
+        # Inject custom URLs (priority — always included)
+        if self.custom_urls:
+            for url in list(self.custom_urls):
+                if url not in seen:
+                    candidates.insert(0, {
+                        "url": url,
+                        "id": url.split("/")[-1],
+                        "title": "custom",
+                        "source": "custom",
+                        "duration": None,
+                    })
+                    log.info("[CUSTOM] Injecting: %s", url[:80])
 
         # Deduplicate and limit
         unique = {}
