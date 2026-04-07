@@ -117,13 +117,10 @@ class Trainer:
             w = eval_cfg.get("width", 576)
             h = eval_cfg.get("height", 576)
             f = eval_cfg.get("num_frames", 49)
-            # Use i2v refs if available (all prompts must have images), else t2v
-            if i2v_refs and len(i2v_refs) >= 2:
-                prompts = [ref["prompt"] for ref in i2v_refs[:2]]
-                images = [ref["image"] for ref in i2v_refs[:2]]
-            else:
-                prompts = list(eval_cfg["prompts"])
-                images = None
+            # t2v validation always uses the fixed eval prompts (no images)
+            # i2v validation runs separately via _run_i2v_eval in orchestrator
+            prompts = list(eval_cfg["prompts"])
+            images = None
             config["validation"] = {
                 "prompts": prompts,
                 "negative_prompt": "worst quality, inconsistent motion, blurry, jittery, distorted",
