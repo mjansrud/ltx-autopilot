@@ -481,12 +481,15 @@ class PipelineOrchestrator:
         # ── Load I2V refs from PREVIOUS batch (unseen frames) ─────
         i2v_refs = []
         try:
-            prev_refs_file = i2v_dir / "prev_refs.json"
-            if prev_refs_file.exists():
-                i2v_refs = json.loads(prev_refs_file.read_text(encoding="utf-8"))
-                log.info("Loaded %d I2V refs from previous batch", len(i2v_refs))
-        except Exception:
-            pass
+            prev_batch_dir = Path(f"./workspace/batch-{batch-1:04d}") if batch > 0 else None
+            if prev_batch_dir:
+                # Check prev batch's i2v_refs for pending_refs (saved for us)
+                prev_refs_file = prev_batch_dir / "i2v_refs" / "pending_refs.json"
+                if prev_refs_file.exists():
+                    i2v_refs = json.loads(prev_refs_file.read_text(encoding="utf-8"))
+                    log.info("Loaded %d I2V refs from batch %d", len(i2v_refs), batch - 1)
+        except Exception as e:
+            log.debug("I2V ref load failed: %s", e)
 
         # ── 6. Evaluate (MODEL LOADED → UNLOADED) ─────────────────
         eval_cfg = self.cfg.get("evaluation", {})
