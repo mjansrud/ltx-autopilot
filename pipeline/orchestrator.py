@@ -214,6 +214,7 @@ class PipelineOrchestrator:
     def _generate_i2v_refs(self, batch_num: int):
         """Generate i2v refs from NEXT batch's captioned clips (unseen data).
 
+        Saves images + metadata.jsonl directly to batch_dir/i2v/.
         Only clips that passed Omni's SKIP filter (have captions) are eligible.
         Extracts a mid-clip frame to avoid title cards / ad screens at start/end.
         """
@@ -236,12 +237,12 @@ class PipelineOrchestrator:
 
         # Shuffle and pick 2 — all entries already passed Omni SKIP filter
         random.shuffle(entries)
-        i2v_refs = []
-        i2v_dir = self.work_dir / "i2v_refs"
+        i2v_dir = self.work_dir / "i2v"
         i2v_dir.mkdir(parents=True, exist_ok=True)
+        meta_lines = []
 
         for entry in entries:
-            if len(i2v_refs) >= 2:
+            if len(meta_lines) >= 2:
                 break
             clip_path = Path(entry["media_path"])
             if not clip_path.is_absolute():
@@ -254,29 +255,13 @@ class PipelineOrchestrator:
 
             img_path = i2v_dir / f"{clip_path.stem}.png"
             cv2.imwrite(str(img_path), frame)
-            i2v_refs.append({"image": str(img_path.resolve()), "prompt": entry["caption"]})
+            meta_lines.append(json.dumps({"image": str(img_path.resolve()), "prompt": entry["caption"]}, ensure_ascii=False))
             log.info("[I2V] Ref: %s (%d chars)", clip_path.name, len(entry["caption"]))
 
-        if i2v_refs:
-            refs_file = self.work_dir / "i2v_refs.json"
-            refs_file.write_text(json.dumps(i2v_refs, ensure_ascii=False), encoding="utf-8")
-            self._copy_i2v_to_canonical(i2v_refs)
-            log.info("[I2V] Saved %d refs for validation", len(i2v_refs))
-
-    def _copy_i2v_to_canonical(self, i2v_refs: list[dict]):
-        """Copy i2v refs to workspace i2v/ dir with metadata.jsonl."""
-        i2v_out = self.work_dir / "i2v"
-        i2v_out.mkdir(parents=True, exist_ok=True)
-        meta_lines = []
-        for ref in i2v_refs:
-            src = Path(ref["image"])
-            dst = i2v_out / src.name
-            if src.exists():
-                shutil.copy2(src, dst)
-            meta_lines.append(json.dumps({"image": str(dst.resolve()), "prompt": ref["prompt"]}, ensure_ascii=False))
-        meta_file = i2v_out / "metadata.jsonl"
-        meta_file.write_text("\n".join(meta_lines) + "\n", encoding="utf-8")
-        log.info("[I2V] Copied %d refs to %s", len(i2v_refs), i2v_out)
+        if meta_lines:
+            meta_file = i2v_dir / "metadata.jsonl"
+            meta_file.write_text("\n".join(meta_lines) + "\n", encoding="utf-8")
+            log.info("[I2V] Saved %d refs to %s", len(meta_lines), i2v_dir)
 
     def _save_batch_data(self, batch_num: int):
         """Save scenes + captions into batch dir for recovery + archival."""
@@ -419,12 +404,15 @@ class PipelineOrchestrator:
 
         # ── 5. Train (runs as subprocess, GPU occupied) ────────────
 
-        # Load i2v refs if available
+        # Load i2v refs from i2v/metadata.jsonl (generated during captioning)
         i2v_refs = None
-        refs_file = self.work_dir / "i2v_refs.json"
-        if refs_file.exists():
-            i2v_refs = json.loads(refs_file.read_text(encoding="utf-8"))
-            log.info("[I2V] Passing %d refs to validation", len(i2v_refs))
+        i2v_meta = self.work_dir / "i2v" / "metadata.jsonl"
+        if i2v_meta.exists():
+            i2v_refs = []
+            for line in i2v_meta.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    i2v_refs.append(json.loads(line))
+            log.info("[I2V] Loaded %d refs for i2v evaluation", len(i2v_refs))
 
         with vram_stage("training"):
             steps = self.cfg["training"]["steps_per_batch"]
