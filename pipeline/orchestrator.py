@@ -163,45 +163,25 @@ class PipelineOrchestrator:
         dash.show_cleanup(False)
 
     def _generate_i2v_refs(self, batch_num: int):
-        """Generate i2v refs from NEXT batch's prefetched scenes.
-        Uses clips that already have captions from the prefetched batch's metadata."""
+        """Generate i2v refs from current batch's own captioned clips.
+        Picks 2 random clips that passed SKIP filter (already in metadata.jsonl)."""
         import cv2, random
 
-        next_batch_dir = Path(f"./workspace/batch-{batch_num + 1:04d}")
-        next_meta = next_batch_dir / "metadata.jsonl"
-        next_scenes = next_batch_dir / "scenes"
-
-        # If prefetch has captioned data, use those (already filtered, no SKIP)
-        if next_meta.exists() and next_meta.stat().st_size > 0:
-            entries = []
-            for line in next_meta.read_text(encoding="utf-8").splitlines():
-                if line.strip():
-                    entries.append(json.loads(line))
-        elif next_scenes.exists():
-            # Prefetch hasn't captioned yet — caption 2 clips now while model loaded
-            clips = sorted(next_scenes.glob("*.mp4"))
-            if len(clips) < 2:
-                log.info("[I2V] Not enough prefetched clips, skipping")
-                return
-            picks = random.sample(clips[1:-1] if len(clips) > 3 else clips, min(2, len(clips)))
-            entries = []
-            for clip in picks:
-                try:
-                    caption = self.captioner.caption_video(clip)
-                    if not caption.strip().upper().startswith("SKIP"):
-                        entries.append({"media_path": str(clip), "caption": caption})
-                except Exception as e:
-                    log.warning("[I2V] Failed to caption %s: %s", clip.name, e)
-        else:
-            log.info("[I2V] No prefetched data yet, skipping")
+        metadata = self.work_dir / "metadata.jsonl"
+        if not metadata.exists() or metadata.stat().st_size == 0:
+            log.info("[I2V] No captions yet, skipping")
             return
+
+        entries = []
+        for line in metadata.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                entries.append(json.loads(line))
 
         if len(entries) < 2:
-            log.info("[I2V] Not enough usable clips for i2v (%d)", len(entries))
+            log.info("[I2V] Not enough clips for i2v (%d)", len(entries))
             return
 
-        # Pick 2 random entries and extract first frames
-        picks = random.sample(entries, min(2, len(entries)))
+        picks = random.sample(entries, 2)
         i2v_refs = []
         i2v_dir = self.work_dir / "i2v_refs"
         i2v_dir.mkdir(parents=True, exist_ok=True)
@@ -209,7 +189,7 @@ class PipelineOrchestrator:
         for entry in picks:
             clip_path = Path(entry["media_path"])
             if not clip_path.is_absolute():
-                clip_path = next_batch_dir / clip_path
+                clip_path = self.work_dir / clip_path
 
             cap = cv2.VideoCapture(str(clip_path))
             ret, frame = cap.read()
