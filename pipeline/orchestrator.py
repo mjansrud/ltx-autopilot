@@ -11,6 +11,7 @@ kept running across batches.
 import json
 import logging
 import shutil
+import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
 from pathlib import Path
