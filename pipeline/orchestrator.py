@@ -164,6 +164,15 @@ class PipelineOrchestrator:
 
     def _caption_prefetched_batch(self, next_batch_num: int):
         """Caption the prefetched next batch's scenes while Omni is still loaded."""
+        # Wait for prefetch to complete (download + scene split runs in background thread)
+        if self._prefetch_future is not None:
+            log.info("[PREFETCH-CAPTION] Waiting for prefetch to complete...")
+            try:
+                self._prefetch_future.result(timeout=300)  # 5 min max
+            except Exception as e:
+                log.warning("[PREFETCH-CAPTION] Prefetch failed: %s", e)
+            self._prefetch_future = None
+
         next_batch_dir = Path(f"./workspace/batch-{next_batch_num:04d}")
         next_scenes = next_batch_dir / "scenes"
         next_meta = next_batch_dir / "metadata.jsonl"
