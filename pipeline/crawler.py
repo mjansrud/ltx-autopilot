@@ -36,9 +36,18 @@ class LustpressServer:
             s.settimeout(1)
             return s.connect_ex(("localhost", self.port)) == 0
 
+    def _is_server_alive(self) -> bool:
+        """Check if Lustpress actually responds to HTTP requests."""
+        try:
+            import requests
+            r = requests.get(f"http://localhost:{self.port}/xvideos/random", timeout=5)
+            return r.status_code in (200, 301, 302, 404)
+        except Exception:
+            return False
+
     def start(self):
         """Start the Lustpress server if not already running."""
-        if self._is_port_open():
+        if self._is_port_open() and self._is_server_alive():
             log.info("Lustpress already running on port %d", self.port)
             return
 
