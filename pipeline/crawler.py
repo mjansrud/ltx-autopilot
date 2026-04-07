@@ -206,13 +206,9 @@ class VideoCrawler:
             except Exception as e:
                 log.debug("[QUERY-GEN] Captioner failed: %s", e)
 
-        # Fallback: random from config + random modifiers for variety
-        base = random.choice(self.queries)
-        modifiers = ["pov", "amateur", "professional", "close up", "passionate",
-                     "rough", "sensual", "outdoor", "homemade", "casting"]
-        modifier = random.choice(modifiers)
-        query = f"{base} {modifier}".replace(" hd ", " ").rstrip(" hd") + " hd"
-        log.info("[QUERY-GEN] Fallback: '%s'", query)
+        # Fallback: pick from config queries (captioner not available)
+        query = random.choice(self.queries)
+        log.info("[QUERY-GEN] Fallback (no LLM): '%s'", query)
         with open(history_file, "a") as f:
             f.write(query + "\n")
         return query

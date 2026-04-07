@@ -349,6 +349,15 @@ class PipelineOrchestrator:
             log.info("[1-2/6] Using prefetched data: %d videos, %d scenes", len(videos), len(scene_videos))
             dash.show_scene_split(len(videos), len(scene_videos), scenes_dir if scenes_dir.exists() else raw_dir)
         else:
+            # Generate search query using captioner if no pre-generated one exists
+            query_file = Path("./workspace") / "next_query.txt"
+            if not query_file.exists():
+                log.info("[QUERY-GEN] Loading captioner to generate search query...")
+                self.captioner.load()
+                self.crawler.generate_next_query(batch)
+                self.captioner.unload()
+                flush_vram()
+
             with vram_stage("crawl", False):
                 log.info("[1/6] Crawling videos via Lustpress...")
                 videos = self.crawler.crawl(batch, raw_dir)
