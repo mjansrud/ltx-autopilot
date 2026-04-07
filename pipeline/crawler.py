@@ -207,6 +207,7 @@ class VideoCrawler:
 
     def _collect_video_urls(self, batch_num: int) -> list[dict]:
         """Search Lustpress and collect video page URLs."""
+        import random
         seen = self._load_seen()
         candidates = []
 
@@ -214,9 +215,16 @@ class VideoCrawler:
         query_idx = batch_num % len(self.queries)
         query = self.queries[query_idx]
 
-        # Search across configured sources
-        for source in self.sources:
-            results = self.server.search(source, query, page=1, sort="mr")
+        # Randomize page (1-5) and sort to get diverse results across restarts
+        page = random.randint(1, 5)
+        sort = random.choice(["mr", "mv", "tr", "lg"])  # most recent, most viewed, top rated, longest
+        log.info("Search params: query='%s', page=%d, sort=%s", query, page, sort)
+
+        # Search across configured sources (shuffled order for variety)
+        sources = list(self.sources)
+        random.shuffle(sources)
+        for source in sources:
+            results = self.server.search(source, query, page=page, sort=sort)
 
             for item in results:
                 link = item.get("link", "")
