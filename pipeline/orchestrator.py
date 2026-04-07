@@ -162,12 +162,32 @@ class PipelineOrchestrator:
 
         dash.show_cleanup(False)
 
+    def _caption_prefetched_batch(self, next_batch_num: int):
+        """Caption the prefetched next batch's scenes while Omni is still loaded."""
+        next_batch_dir = Path(f"./workspace/batch-{next_batch_num:04d}")
+        next_scenes = next_batch_dir / "scenes"
+        next_meta = next_batch_dir / "metadata.jsonl"
+
+        if not next_scenes.exists():
+            log.info("[PREFETCH-CAPTION] No prefetched scenes for batch %d", next_batch_num)
+            return
+        if next_meta.exists() and next_meta.stat().st_size > 0:
+            log.info("[PREFETCH-CAPTION] Batch %d already captioned", next_batch_num)
+            return
+
+        clips = sorted(next_scenes.glob("*.mp4"))
+        if not clips:
+            return
+
+        log.info("[PREFETCH-CAPTION] Captioning %d prefetched clips for batch %d", len(clips), next_batch_num)
+        self.captioner.caption_batch(clips, next_meta)
+
     def _generate_i2v_refs(self, batch_num: int):
-        """Generate i2v refs from current batch's own captioned clips.
-        Picks 2 random clips that passed SKIP filter (already in metadata.jsonl)."""
+        """Generate i2v refs from NEXT batch's captioned clips (unseen data)."""
         import cv2, random
 
-        metadata = self.work_dir / "metadata.jsonl"
+        next_batch_dir = Path(f"./workspace/batch-{batch_num + 1:04d}")
+        metadata = next_batch_dir / "metadata.jsonl"
         if not metadata.exists() or metadata.stat().st_size == 0:
             log.info("[I2V] No captions yet, skipping")
             return
@@ -189,7 +209,7 @@ class PipelineOrchestrator:
         for entry in picks:
             clip_path = Path(entry["media_path"])
             if not clip_path.is_absolute():
-                clip_path = self.work_dir / clip_path
+                clip_path = next_batch_dir / clip_path
 
             cap = cv2.VideoCapture(str(clip_path))
             ret, frame = cap.read()
@@ -324,7 +344,10 @@ class PipelineOrchestrator:
 
                 self.captioner.caption_batch(scene_videos, metadata_file)
 
-                # Generate i2v refs from prefetched scenes (captioner still loaded)
+                # Caption prefetched next batch while Omni is still loaded
+                self._caption_prefetched_batch(batch + 1)
+
+                # Generate i2v refs from next batch (unseen, already captioned)
                 self._generate_i2v_refs(batch)
 
                 # Model is now UNLOADED — GPU is free
