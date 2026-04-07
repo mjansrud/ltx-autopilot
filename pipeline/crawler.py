@@ -165,10 +165,20 @@ class VideoCrawler:
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _load_seen(self) -> set[str]:
+        seen = set()
+        # Load from seen_videos.txt
         path = Path(self.archive_path)
         if path.exists():
-            return set(line.strip() for line in path.read_text().splitlines() if line.strip())
-        return set()
+            seen = set(line.strip() for line in path.read_text().splitlines() if line.strip())
+        # Also scan existing downloaded files across all batches to catch
+        # videos from crashed runs that weren't marked as seen
+        for mp4 in Path("./workspace").glob("batch-*/raw/*.mp4"):
+            # Extract video ID from filename (e.g. xnxx_iezyl34.mp4 -> iezyl34)
+            stem = mp4.stem
+            parts = stem.split("_", 1)
+            if len(parts) == 2:
+                seen.add(parts[1])  # Add just the video ID for fuzzy matching
+        return seen
 
     def _mark_seen(self, url: str):
         with open(self.archive_path, "a") as f:
@@ -211,12 +221,11 @@ class VideoCrawler:
         seen = self._load_seen()
         candidates = []
 
-        # Pick query for this batch
-        query_idx = batch_num % len(self.queries)
-        query = self.queries[query_idx]
+        # Pick a random query (not tied to batch number — avoids same query on restarts)
+        query = random.choice(self.queries)
 
-        # Randomize page (1-5) and sort to get diverse results across restarts
-        page = random.randint(1, 5)
+        # Randomize page and sort to get diverse results from millions of videos
+        page = random.randint(1, 100)
         sort = random.choice(["mr", "mv", "tr", "lg"])  # most recent, most viewed, top rated, longest
         log.info("Search params: query='%s', page=%d, sort=%s", query, page, sort)
 
@@ -230,7 +239,12 @@ class VideoCrawler:
                 link = item.get("link", "")
                 vid_id = item.get("id", "")
 
-                if not link or link in seen:
+                if not link or link in seen or vid_id in seen:
+                    continue
+
+                # Skip if we already have a video from this uploader
+                uploader = (item.get("uploader") or item.get("author") or item.get("channel") or "").lower()
+                if uploader and any(c.get("uploader") == uploader for c in candidates):
                     continue
 
                 # Duration filtering
@@ -245,6 +259,7 @@ class VideoCrawler:
                     "title": item.get("title", "unknown"),
                     "source": source,
                     "duration": dur,
+                    "uploader": uploader,
                 })
 
                 if len(candidates) >= self.max_per_batch * 2:
