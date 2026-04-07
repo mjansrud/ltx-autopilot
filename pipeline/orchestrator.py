@@ -43,7 +43,7 @@ class PipelineOrchestrator:
         self.lustpress = LustpressServer(lustpress_dir, lustpress_port)
 
         # Initialize components (no models loaded yet)
-        self.crawler = VideoCrawler(self.cfg["crawler"], self.lustpress)
+        self.crawler = VideoCrawler(self.cfg["crawler"], self.lustpress, captioner=self.captioner)
         self.scene_splitter = SceneSplitter(self.cfg.get("scene_split", {}), self.cfg["ltx_trainer_dir"])
         self.captioner = create_captioner(self.cfg["captioner"])
         self.preprocessor = Preprocessor(self.cfg["preprocessing"], self.cfg["training"], self.cfg["ltx_trainer_dir"])
@@ -386,7 +386,11 @@ class PipelineOrchestrator:
                 # Generate i2v refs from next batch (unseen, already captioned)
                 self._generate_i2v_refs(batch)
 
-                # Model is now UNLOADED — GPU is free
+                # Generate search query for next crawl while model is still loaded
+                self.crawler.generate_next_query(batch + 1)
+
+                # Now unload captioner
+                self.captioner.unload()
                 flush_vram()
                 dash.show_vram_status("after caption model unload", get_vram_usage())
 

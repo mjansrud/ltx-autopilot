@@ -152,8 +152,9 @@ class VideoCrawler:
       4. Download with yt-dlp (handles the actual video extraction)
     """
 
-    def __init__(self, config: dict, server: LustpressServer):
+    def __init__(self, config: dict, server: LustpressServer, captioner=None):
         self.server = server
+        self._captioner = captioner
         self.queries = config.get("search_queries", ["amateur"])
         self.sources = config.get("sources", ["xvideos", "xnxx", "eporner", "redtube"])
         self.max_per_batch = config.get("max_videos_per_batch", 8)
@@ -180,39 +181,30 @@ class VideoCrawler:
             "Generate a single short adult video search query (3-6 words) for finding diverse HD porn content. "
             "The query should work on sites like xvideos/xnxx/redtube. "
             "Include 'hd' at the end. Focus on HIGH QUALITY, well-lit, professional-looking content.\n\n"
+            "PRIMARY FOCUS: busty natural girls with huge breasts. Big natural tits are the main theme.\n\n"
             "The user's preferred style/themes (for reference, don't copy directly):\n"
             f"{style_hints}\n\n"
-            "Generate a CREATIVE and SPECIFIC query that fits this style but explores NEW variations. "
-            "Vary across: body types (busty, curvy, petite, thick), ethnicities, positions (cowgirl, doggystyle, "
-            "missionary, standing, prone bone), settings (bedroom, shower, outdoor, office), "
-            "camera angles (pov, close up), and acts. Be specific — avoid generic terms.\n\n"
+            "Generate a CREATIVE and SPECIFIC query that features big natural breasts but explores "
+            "NEW variations in: positions (cowgirl, doggystyle, missionary, standing, prone bone, titfuck), "
+            "settings (bedroom, shower, outdoor, office, pool), ethnicities, camera angles (pov, close up), "
+            "and scenarios. Be specific — avoid generic terms.\n\n"
         )
         if recent:
             prompt += f"AVOID these recent queries (already used):\n" + "\n".join(f"- {q}" for q in recent[-10:]) + "\n\n"
         prompt += "Reply with ONLY the search query, nothing else."
 
-        # Try OpenAI-compatible local server (Ollama, vLLM, llama.cpp, etc.)
-        try:
-            from openai import OpenAI
-            for base_url in ["http://localhost:11434/v1", "http://localhost:8080/v1", "http://localhost:1234/v1"]:
-                try:
-                    client = OpenAI(base_url=base_url, api_key="none", timeout=10)
-                    resp = client.chat.completions.create(
-                        model="default",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=30,
-                        temperature=1.2,
-                    )
-                    query = resp.choices[0].message.content.strip().strip('"').lower().split("\n")[0]
-                    if query and 5 < len(query) < 60:
-                        with open(history_file, "a") as f:
-                            f.write(query + "\n")
-                        log.info("[QUERY-GEN] LLM generated: '%s'", query)
-                        return query
-                except Exception:
-                    continue
-        except ImportError:
-            pass
+        # Use the captioner model if available (already loaded on GPU)
+        if self._captioner is not None:
+            try:
+                result = self._captioner.generate_text(prompt)
+                query = result.strip().strip('"').lower().split("\n")[0]
+                if 5 < len(query) < 60:
+                    with open(history_file, "a") as f:
+                        f.write(query + "\n")
+                    log.info("[QUERY-GEN] Captioner generated: '%s'", query)
+                    return query
+            except Exception as e:
+                log.debug("[QUERY-GEN] Captioner failed: %s", e)
 
         # Fallback: random from config + random modifiers for variety
         base = random.choice(self.queries)
@@ -235,6 +227,14 @@ class VideoCrawler:
     def _mark_seen(self, url: str):
         with open(self.archive_path, "a") as f:
             f.write(url + "\n")
+
+    def generate_next_query(self, next_batch_num: int):
+        """Pre-generate a search query for the next batch (call while captioner is loaded)."""
+        query = self._generate_query(next_batch_num)
+        # Save to file so _collect_video_urls can pick it up
+        query_file = Path("./workspace") / "next_query.txt"
+        query_file.write_text(query)
+        log.info("[QUERY-GEN] Pre-generated query for batch %d: '%s'", next_batch_num, query)
 
     def _parse_duration_seconds(self, duration_str: str) -> int | None:
         """Try to parse duration string to seconds."""
@@ -273,8 +273,14 @@ class VideoCrawler:
         seen = self._load_seen()
         candidates = []
 
-        # Generate a dynamic search query using an LLM for maximum diversity
-        query = self._generate_query(batch_num)
+        # Use pre-generated query if available (from captioner LLM), else generate/fallback
+        query_file = Path("./workspace") / "next_query.txt"
+        if query_file.exists():
+            query = query_file.read_text().strip()
+            query_file.unlink()
+            log.info("[QUERY] Using pre-generated: '%s'", query)
+        else:
+            query = self._generate_query(batch_num)
 
         # Randomize page and sort to get diverse results from millions of videos
         page = random.randint(1, 100)
