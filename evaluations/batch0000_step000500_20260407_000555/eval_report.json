@@ -1,0 +1,17 @@
+{
+  "batch": 0,
+  "total_steps": 500,
+  "checkpoint": "workspace\\batch-0000\\checkpoints",
+  "compared_base": false,
+  "prompts": [
+    "A medium shot in a warmly lit bedroom shows a busty brunette woman with tan skin slowly pulling her black lace bra straps down her shoulders, revealing large round breasts with dark erect nipples. She looks directly into the camera with parted lips and half-closed eyes, then turns and bends over the edge of a bed, arching her back. Warm golden light from a bedside lamp casts shadows across her skin.",
+    "A close-up shot captures a curvy woman with red hair riding a man in cowgirl position on a white bed. Her large round breasts bounce with each thrust as she places her hands on his chest for support. She moans with her eyes closed and mouth open. The camera is at a low angle emphasizing her chest and expressions of pleasure. Bright natural lighting, modern bedroom setting. Sounds of skin slapping and bed creaking."
+  ],
+  "settings": {
+    "height": 448,
+    "width": 768,
+    "num_frames": 89,
+    "guidance_scale": 4.0,
+    "num_inference_steps": 40
+  }
+}
