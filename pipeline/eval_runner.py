@@ -108,15 +108,31 @@ def run_eval(
         with_text_encoder=True,
     )
 
-    # Quantize transformer with NF4 (same as training)
-    log.info("Quantizing transformer with NF4...")
-    transformer = components.transformer.to(dtype=torch.bfloat16)
-    transformer = quantize_model(transformer, precision="nf4-bnb")
-
-    # Apply LoRA
+    # Apply LoRA BEFORE quantization (PEFT can't wrap Linear4bit)
     log.info("Loading LoRA: %s", checkpoint.name)
-    from ltx_trainer.model_loader import load_lora_weights
-    transformer = load_lora_weights(transformer, str(checkpoint))
+    import re as _re
+    from safetensors.torch import load_file
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+
+    transformer = components.transformer.to(dtype=torch.bfloat16)
+
+    state_dict = load_file(str(checkpoint))
+    state_dict = {k.replace("diffusion_model.", "", 1): v for k, v in state_dict.items()}
+
+    # Extract full module paths (e.g. "transformer_blocks.0.attn1.to_k")
+    target_modules = sorted({m.group(1) for k in state_dict
+                            for m in [_re.match(r"(.+)\.lora_[AB]\.", k)] if m})
+    lora_rank = next(v.shape[0] for k, v in state_dict.items() if "lora_A" in k and v.ndim == 2)
+    log.info("LoRA rank=%d, %d target modules", lora_rank, len(target_modules))
+
+    lora_config = LoraConfig(r=lora_rank, lora_alpha=lora_rank,
+                             target_modules=target_modules, lora_dropout=0.0)
+    transformer = get_peft_model(transformer, lora_config)
+    set_peft_model_state_dict(transformer.get_base_model(), state_dict)
+
+    # Quantize with NF4 AFTER LoRA is applied
+    log.info("Quantizing transformer with NF4...")
+    transformer = quantize_model(transformer, precision="nf4-bnb")
 
     # Get eval params
     width = eval_cfg.get("width", 768)
