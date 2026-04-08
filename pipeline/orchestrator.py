@@ -502,6 +502,18 @@ class PipelineOrchestrator:
         model_path = self.cfg["training"]["model_checkpoint"]
         text_encoder = self.cfg["training"]["text_encoder"]
 
+        # Find the actual LoRA weights file (checkpoint may be a directory)
+        ckpt_path = Path(checkpoint)
+        if ckpt_path.is_dir():
+            lora_files = sorted(ckpt_path.glob("lora_weights_*.safetensors"))
+            if lora_files:
+                lora_path = str(lora_files[-1].resolve())
+            else:
+                log.warning("No lora_weights found in %s, skipping I2V eval", checkpoint)
+                return
+        else:
+            lora_path = str(ckpt_path.resolve())
+
         env = os.environ.copy()
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
@@ -512,7 +524,7 @@ class PipelineOrchestrator:
                 sys.executable, str(script.resolve()),
                 "--checkpoint", str(Path(model_path).resolve()),
                 "--text-encoder-path", str(Path(text_encoder).resolve()),
-                "--lora-path", str(Path(checkpoint).resolve()),
+                "--lora-path", lora_path,
                 "--condition-image", ref["image"],
                 "--prompt", ref["prompt"],
                 "--output", str(out_path),
