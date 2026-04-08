@@ -128,13 +128,17 @@ def run_eval(
         sys.path.insert(0, scripts_dir)
     from inference import load_lora_weights
 
-    transformer = components.transformer.to(dtype=torch.bfloat16)
-    transformer = load_lora_weights(transformer, str(checkpoint))
-
-    # Only quantize with NF4 if using combined file (split files are small enough)
-    if not vae_path:
-        log.info("Quantizing transformer with NF4...")
-        transformer = quantize_model(transformer, precision="nf4-bnb")
+    # Fuse LoRA into base weights (no PEFT, no NF4 — inference runs briefly)
+    log.info("Fusing LoRA into base model...")
+    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+    from ltx_core.model.transformer.model_configurator import (
+        LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator,
+    )
+    transformer = SingleGPUModelBuilder(
+        model_path=str(Path(model_path).resolve()),
+        model_class_configurator=LTXModelConfigurator,
+        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
+    ).lora(str(checkpoint)).build(device=torch.device("cpu"), dtype=torch.bfloat16)
 
     # Get eval params — use moderate settings to fit in VRAM with NF4+LoRA
     width = eval_cfg.get("width", 768)
