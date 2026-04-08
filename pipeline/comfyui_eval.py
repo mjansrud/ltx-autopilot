@@ -110,6 +110,7 @@ def build_aio_prompt(
     lora_strength: float = 1.0,
     seed: int = 42,
     output_prefix: str = "autopilot_eval",
+    condition_image: str | None = None,
 ) -> dict | None:
     """Load the full AIO workflow and modify prompt + LoRA."""
     aio_path = Path(__file__).parent.parent / "workflow.json"
@@ -138,6 +139,13 @@ def build_aio_prompt(
     # Update output prefix
     if "141" in wf:
         wf["141"]["inputs"]["filename_prefix"] = output_prefix
+
+    # Update conditioning image for i2v
+    if condition_image and "98" in wf:
+        img_src = Path(condition_image)
+        img_dst = COMFYUI_INPUT_DIR / img_src.name
+        shutil.copy2(img_src, img_dst)
+        wf["98"]["inputs"]["image"] = img_src.name
 
     return wf
 
@@ -337,8 +345,10 @@ def run_eval(
         for i, prompt in enumerate(prompts):
             log.info("T2V %d: %.80s...", i, prompt)
             prefix = f"step_{step:06d}_t2v_{i}"
-            p = build_t2v_prompt(prompt, lora_name, width=width, height=height,
-                                num_frames=num_frames, seed=42+i, output_prefix=prefix)
+            p = build_aio_prompt(prompt, lora_name, seed=42+i, output_prefix=prefix)
+            if p is None:
+                p = build_t2v_prompt(prompt, lora_name, width=width, height=height,
+                                    num_frames=num_frames, seed=42+i, output_prefix=prefix)
             prompt_id = queue_prompt(p)
             result = wait_for_completion(prompt_id)
             if result:
@@ -352,9 +362,13 @@ def run_eval(
         for i, ref in enumerate(i2v_refs[:2]):
             log.info("I2V %d: %s", i, Path(ref["image"]).name)
             prefix = f"step_{step:06d}_i2v_{i}"
-            p = build_i2v_prompt(ref["prompt"], ref["image"], lora_name,
-                                width=width, height=height, num_frames=num_frames,
-                                seed=42+i, output_prefix=prefix)
+            # Try AIO workflow with conditioning image
+            p = build_aio_prompt(ref["prompt"], lora_name, seed=42+i,
+                                output_prefix=prefix, condition_image=ref["image"])
+            if p is None:
+                p = build_i2v_prompt(ref["prompt"], ref["image"], lora_name,
+                                    width=width, height=height, num_frames=num_frames,
+                                    seed=42+i, output_prefix=prefix)
             prompt_id = queue_prompt(p)
             result = wait_for_completion(prompt_id)
             if result:
