@@ -99,7 +99,7 @@ def run_eval(
     import gc
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
 
-    # Load transformer with LoRA fused in (baked into weights at load time)
+    # Load transformer with LoRA fused, move to GPU immediately to free CPU RAM
     log.info("Loading transformer + fusing LoRA...")
     from ltx_core.model.transformer.model_configurator import (
         LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator,
@@ -109,16 +109,17 @@ def run_eval(
         model_class_configurator=LTXModelConfigurator,
         model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
     ).lora(str(checkpoint)).build(device=torch.device("cpu"), dtype=torch.bfloat16)
+    transformer = transformer.to("cuda")
     gc.collect()
+    log.info("Transformer on GPU: %.1f GB VRAM", torch.cuda.memory_allocated() / 1024**3)
 
-    # Load VAE decoder
+    # Load small components (VAE, text encoder) — transformer is off CPU now
     log.info("Loading VAE decoder...")
     from ltx_trainer.model_loader import load_video_vae_decoder, load_text_encoder, load_embeddings_processor
     vae_decoder = load_video_vae_decoder(model_path, "cpu", torch.bfloat16)
     gc.collect()
 
-    # Load text encoder + embeddings processor
-    log.info("Loading text encoder...")
+    log.info("Loading text encoder + embeddings processor...")
     text_encoder = load_text_encoder(text_encoder_path, "cpu", torch.bfloat16)
     text_encoder.embeddings_processor = load_embeddings_processor(model_path, "cpu", torch.bfloat16)
     gc.collect()
