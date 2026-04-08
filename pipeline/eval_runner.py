@@ -96,17 +96,28 @@ def run_eval(
     text_encoder_path = cfg["training"]["text_encoder"]
 
     log.info("Loading model (NF4 quantized)...")
+    # Load without VAE encoder first (avoids mmap segfault from too many components)
+    # VAE encoder is loaded lazily by the sampler when needed for i2v
     components = load_model(
         checkpoint_path=model_path,
         text_encoder_path=text_encoder_path,
         device="cpu",
         dtype=torch.bfloat16,
-        with_video_vae_encoder=do_i2v,
+        with_video_vae_encoder=False,
         with_video_vae_decoder=True,
         with_audio_vae_decoder=False,
         with_vocoder=False,
         with_text_encoder=True,
     )
+
+    # Load VAE encoder separately if needed (after text encoder is loaded)
+    import gc
+    gc.collect()
+    vae_encoder = None
+    if do_i2v:
+        from ltx_trainer.model_loader import load_video_vae_encoder
+        log.info("Loading VAE encoder for i2v...")
+        vae_encoder = load_video_vae_encoder(model_path, torch.device("cpu"), torch.bfloat16)
 
     # Apply LoRA using inference.py's load_lora_weights (auto-detects rank + modules)
     log.info("Loading LoRA: %s", checkpoint.name)
@@ -135,7 +146,7 @@ def run_eval(
         sampler = ValidationSampler(
             transformer=transformer,
             vae_decoder=components.video_vae_decoder,
-            vae_encoder=components.video_vae_encoder,
+            vae_encoder=vae_encoder,
             text_encoder=components.text_encoder,
             embeddings_processor=components.text_encoder.embeddings_processor,
             sampling_context=progress,
