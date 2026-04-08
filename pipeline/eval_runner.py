@@ -142,7 +142,7 @@ def run_eval(
     del state_dict
     gc.collect()
 
-    # Quantize with NF4
+    # Quantize with NF4 (compresses 44GB bf16 → ~10GB on GPU)
     log.info("Quantizing with NF4...")
     transformer = quantize_model(transformer, precision="nf4-bnb")
     gc.collect()
