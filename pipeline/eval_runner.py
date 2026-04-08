@@ -146,6 +146,27 @@ def run_eval(
     gc.collect()
     log.info("Transformer on GPU: %.1f GB VRAM", torch.cuda.memory_allocated() / 1024**3)
 
+    # Apply chunked feedforward to reduce peak VRAM (like ComfyUI's LTXV Chunk FeedForward)
+    import types
+    def _ffn_chunked_forward(self, x):
+        num_chunks = 4
+        if x.shape[1] > 4096:
+            chunk_size = x.shape[1] // num_chunks
+            for i in range(num_chunks):
+                start = i * chunk_size
+                end = (i + 1) * chunk_size if i < num_chunks - 1 else x.shape[1]
+                x[:, start:end] = self.net(x[:, start:end])
+            return x
+        return self.net(x)
+
+    base_model = transformer
+    if hasattr(transformer, 'get_base_model'):
+        base_model = transformer.get_base_model()
+    if hasattr(base_model, 'transformer_blocks'):
+        for block in base_model.transformer_blocks:
+            block.ff.forward = types.MethodType(_ffn_chunked_forward, block.ff)
+        log.info("Applied chunked feedforward (%d chunks) to %d blocks", 4, len(base_model.transformer_blocks))
+
     # VAE encoder loaded lazily for i2v (below)
 
     # Get eval params — use moderate settings to fit in VRAM with NF4+LoRA
