@@ -460,26 +460,30 @@ class PipelineOrchestrator:
         )
 
         if should_eval and checkpoint:
-            with vram_stage("evaluation"):
-                log.info("[6/6] Evaluating LoRA (t2v + i2v) at step %d...", new_total)
-                from .eval_runner import run_eval, find_latest_checkpoint as _find_ckpt
+            log.info("[6/6] Evaluating LoRA at step %d...", new_total)
+            ckpt_path = Path(checkpoint)
+            if ckpt_path.is_dir():
+                lora_files = sorted(ckpt_path.glob("lora_weights_*.safetensors"))
+                ckpt_file = lora_files[-1] if lora_files else None
+            else:
+                ckpt_file = ckpt_path
 
-                ckpt_path = Path(checkpoint)
-                if ckpt_path.is_dir():
-                    lora_files = sorted(ckpt_path.glob("lora_weights_*.safetensors"))
-                    ckpt_file = lora_files[-1] if lora_files else None
-                else:
-                    ckpt_file = ckpt_path
-
-                if ckpt_file:
-                    run_eval(
-                        config_path=str(self.config_path),
+            if ckpt_file:
+                from .comfyui_eval import run_eval as comfyui_eval, is_running as comfyui_running
+                eval_cfg = self.cfg.get("evaluation", {})
+                if comfyui_running():
+                    comfyui_eval(
                         checkpoint=ckpt_file,
                         step=new_total,
-                        batch_dir=self.work_dir,
-                        do_t2v=True,
-                        do_i2v=bool(i2v_refs),
+                        output_dir=self.work_dir / "samples",
+                        prompts=eval_cfg.get("prompts", []),
+                        i2v_refs=i2v_refs,
+                        width=eval_cfg.get("width", 768),
+                        height=eval_cfg.get("height", 448),
+                        num_frames=eval_cfg.get("num_frames", 89),
                     )
+                else:
+                    log.warning("ComfyUI not running — skipping eval")
 
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
