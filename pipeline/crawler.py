@@ -199,7 +199,10 @@ class VideoCrawler:
         if self._captioner is not None:
             try:
                 result = self._captioner.generate_text(prompt)
+                import re as _re
                 query = result.strip().strip('"').lower().split("\n")[0]
+                query = _re.sub(r'[^a-z0-9 ]', ' ', query).strip()  # only alphanumeric + spaces
+                query = ' '.join(query.split())  # collapse whitespace
                 if 5 < len(query) < 60:
                     with open(history_file, "a") as f:
                         f.write(query + "\n")
@@ -311,7 +314,6 @@ class VideoCrawler:
                     "title": item.get("title", "unknown"),
                     "source": source,
                     "duration": dur,
-                    "uploader": uploader,
                 })
 
                 if len(candidates) >= self.max_per_batch * 2:
