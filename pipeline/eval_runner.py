@@ -96,41 +96,11 @@ def run_eval(
     text_encoder_path = cfg["training"]["text_encoder"]
     vae_path = cfg["training"].get("vae_checkpoint")
 
-    log.info("Loading model (split files)..." if vae_path else "Loading model...")
-    components = load_model(
-        checkpoint_path=model_path,
-        text_encoder_path=text_encoder_path,
-        vae_checkpoint_path=vae_path,
-        device="cpu",
-        dtype=torch.bfloat16,
-        with_video_vae_encoder=False,  # Load separately to avoid mmap crash
-        with_video_vae_decoder=True,
-        with_audio_vae_decoder=False,
-        with_vocoder=False,
-        with_text_encoder=True,
-    )
-
-    # Load VAE encoder separately if needed for i2v
     import gc
-    gc.collect()
-    vae_encoder = None
-    if do_i2v:
-        from ltx_trainer.model_loader import load_video_vae_encoder
-        log.info("Loading VAE encoder for i2v...")
-        vae_encoder = load_video_vae_encoder(
-            vae_path or model_path, torch.device("cpu"), torch.bfloat16
-        )
-
-    # Apply LoRA
-    log.info("Loading LoRA: %s", checkpoint.name)
-    scripts_dir = str(Path(cfg["ltx_trainer_dir"]) / "scripts")
-    if scripts_dir not in sys.path:
-        sys.path.insert(0, scripts_dir)
-    from inference import load_lora_weights
-
-    # Fuse LoRA into base weights (no PEFT, no NF4 — inference runs briefly)
-    log.info("Fusing LoRA into base model...")
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
+
+    # Load transformer with LoRA fused in (baked into weights at load time)
+    log.info("Loading transformer + fusing LoRA...")
     from ltx_core.model.transformer.model_configurator import (
         LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator,
     )
@@ -139,6 +109,21 @@ def run_eval(
         model_class_configurator=LTXModelConfigurator,
         model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
     ).lora(str(checkpoint)).build(device=torch.device("cpu"), dtype=torch.bfloat16)
+    gc.collect()
+
+    # Load VAE decoder
+    log.info("Loading VAE decoder...")
+    from ltx_trainer.model_loader import load_video_vae_decoder, load_text_encoder, load_embeddings_processor
+    vae_decoder = load_video_vae_decoder(model_path, "cpu", torch.bfloat16)
+    gc.collect()
+
+    # Load text encoder + embeddings processor
+    log.info("Loading text encoder...")
+    text_encoder = load_text_encoder(text_encoder_path, "cpu", torch.bfloat16)
+    text_encoder.embeddings_processor = load_embeddings_processor(model_path, "cpu", torch.bfloat16)
+    gc.collect()
+
+    # VAE encoder loaded lazily for i2v (below)
 
     # Get eval params — use moderate settings to fit in VRAM with NF4+LoRA
     width = eval_cfg.get("width", 768)
@@ -152,10 +137,10 @@ def run_eval(
     with StandaloneSamplingProgress(num_steps=num_steps) as progress:
         sampler = ValidationSampler(
             transformer=transformer,
-            vae_decoder=components.video_vae_decoder,
-            vae_encoder=vae_encoder,
-            text_encoder=components.text_encoder,
-            embeddings_processor=components.text_encoder.embeddings_processor,
+            vae_decoder=vae_decoder,
+            vae_encoder=None,  # Loaded lazily for i2v
+            text_encoder=text_encoder,
+            embeddings_processor=text_encoder.embeddings_processor,
             sampling_context=progress,
         )
 
@@ -190,6 +175,13 @@ def run_eval(
             if not i2v_refs:
                 log.warning("No i2v refs found, skipping i2v eval")
             else:
+                # Load VAE encoder for i2v conditioning
+                if sampler._vae_encoder is None:
+                    log.info("Loading VAE encoder for i2v...")
+                    from ltx_trainer.model_loader import load_video_vae_encoder
+                    sampler._vae_encoder = load_video_vae_encoder(model_path, "cpu", torch.bfloat16)
+                    gc.collect()
+
                 from torchvision import transforms
                 from ltx_trainer.utils import open_image_as_srgb
 
