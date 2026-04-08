@@ -94,16 +94,19 @@ def run_eval(
 
     model_path = cfg["training"]["model_checkpoint"]
     text_encoder_path = cfg["training"]["text_encoder"]
-    vae_path = cfg["training"].get("vae_checkpoint")
+    video_vae_path = cfg["training"].get("video_vae_checkpoint")
+    audio_vae_path = cfg["training"].get("audio_vae_checkpoint")
 
     import gc
 
     # Load all components (single mmap avoids repeated file opens)
     # This loads transformer + VAE + text encoder + embeddings processor in one pass
-    log.info("Loading all components (single mmap)...")
+    log.info("Loading all components...")
     components = load_model(
         checkpoint_path=model_path,
         text_encoder_path=text_encoder_path,
+        video_vae_path=video_vae_path,
+        audio_vae_path=audio_vae_path,
         device="cpu",
         dtype=torch.bfloat16,
         with_video_vae_encoder=do_i2v,
