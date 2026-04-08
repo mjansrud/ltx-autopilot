@@ -24,12 +24,39 @@ COMFYUI_OUTPUT_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/output")
 LORA_FILENAME = "x.safetensors"  # Matches the AIO workflow's lora_2 slot
 
 
+COMFYUI_EXE = Path("C:/Users/morte/AppData/Local/Programs/ComfyUI/ComfyUI.exe")
+
+
 def is_running() -> bool:
     try:
         urllib.request.urlopen(f"{COMFYUI_URL}/system_stats", timeout=3)
         return True
     except Exception:
         return False
+
+
+def ensure_running() -> bool:
+    """Start ComfyUI if not running. Returns True if ready."""
+    if is_running():
+        return True
+
+    if not COMFYUI_EXE.exists():
+        log.warning("ComfyUI exe not found at %s", COMFYUI_EXE)
+        return False
+
+    log.info("Starting ComfyUI Desktop...")
+    import subprocess as _sp
+    _sp.Popen([str(COMFYUI_EXE)], creationflags=getattr(_sp, "CREATE_NEW_PROCESS_GROUP", 0))
+
+    # Wait for it to be ready
+    for i in range(60):
+        time.sleep(5)
+        if is_running():
+            log.info("ComfyUI ready (took %ds)", (i + 1) * 5)
+            return True
+
+    log.warning("ComfyUI failed to start within 5 minutes")
+    return False
 
 
 def copy_lora(checkpoint: Path) -> str:
@@ -298,8 +325,8 @@ def run_eval(
     num_frames: int = 89,
 ):
     """Run t2v + i2v evaluation via ComfyUI API."""
-    if not is_running():
-        log.warning("ComfyUI not running — skipping eval")
+    if not ensure_running():
+        log.warning("ComfyUI not available — skipping eval")
         return
 
     lora_name = copy_lora(checkpoint)

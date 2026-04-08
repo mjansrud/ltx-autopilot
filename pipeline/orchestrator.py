@@ -468,8 +468,8 @@ class PipelineOrchestrator:
 
             if ckpt_file:
                 try:
-                    from .comfyui_eval import run_eval as comfyui_eval, is_running as comfyui_running
-                    if comfyui_running():
+                    from .comfyui_eval import run_eval as comfyui_eval
+                    if True:  # comfyui_eval handles starting ComfyUI if needed
                         comfyui_eval(
                             checkpoint=ckpt_file,
                             step=new_total,
