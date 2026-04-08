@@ -106,7 +106,7 @@ def run_eval(
         text_encoder_path=text_encoder_path,
         device="cpu",
         dtype=torch.bfloat16,
-        with_video_vae_encoder=False,  # Loaded separately for i2v
+        with_video_vae_encoder=do_i2v,
         with_video_vae_decoder=True,
         with_audio_vae_decoder=False,
         with_vocoder=False,
@@ -158,7 +158,7 @@ def run_eval(
         sampler = ValidationSampler(
             transformer=transformer,
             vae_decoder=vae_decoder,
-            vae_encoder=None,  # Loaded lazily for i2v
+            vae_encoder=components.video_vae_encoder,
             text_encoder=text_encoder,
             embeddings_processor=text_encoder.embeddings_processor,
             sampling_context=progress,
@@ -195,13 +195,6 @@ def run_eval(
             if not i2v_refs:
                 log.warning("No i2v refs found, skipping i2v eval")
             else:
-                # Load VAE encoder for i2v conditioning
-                if sampler._vae_encoder is None:
-                    log.info("Loading VAE encoder for i2v...")
-                    from ltx_trainer.model_loader import load_video_vae_encoder
-                    sampler._vae_encoder = load_video_vae_encoder(model_path, "cpu", torch.bfloat16)
-                    gc.collect()
-
                 from torchvision import transforms
                 from ltx_trainer.utils import open_image_as_srgb
 
