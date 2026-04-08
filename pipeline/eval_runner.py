@@ -125,12 +125,12 @@ def run_eval(
         log.info("Quantizing transformer with NF4...")
         transformer = quantize_model(transformer, precision="nf4-bnb")
 
-    # Get eval params
+    # Get eval params — use moderate settings to fit in VRAM with NF4+LoRA
     width = eval_cfg.get("width", 768)
     height = eval_cfg.get("height", 448)
-    num_frames = eval_cfg.get("num_frames", 89)
+    num_frames = min(eval_cfg.get("num_frames", 41), 41)  # Cap at 41 frames for NF4 eval
     guidance_scale = eval_cfg.get("guidance_scale", 4.0)
-    num_steps = eval_cfg.get("num_inference_steps", 30)
+    num_steps = min(eval_cfg.get("num_inference_steps", 20), 20)  # Cap at 20 steps
 
     # Create sampler
     from ltx_trainer.progress import StandaloneSamplingProgress
@@ -138,7 +138,7 @@ def run_eval(
         sampler = ValidationSampler(
             transformer=transformer,
             vae_decoder=components.video_vae_decoder,
-            vae_encoder=components.video_vae_encoder,
+            vae_encoder=vae_encoder,
             text_encoder=components.text_encoder,
             embeddings_processor=components.text_encoder.embeddings_processor,
             sampling_context=progress,
