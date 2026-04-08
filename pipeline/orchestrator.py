@@ -498,11 +498,12 @@ class PipelineOrchestrator:
             log.warning("inference.py not found, skipping I2V eval")
             return
 
-        eval_dir = self.work_dir / f"i2v_step{total_steps:06d}"
-        eval_dir.mkdir(parents=True, exist_ok=True)
+        samples_dir = self.work_dir / "samples"
+        samples_dir.mkdir(parents=True, exist_ok=True)
 
         model_path = self.cfg["training"]["model_checkpoint"]
         text_encoder = self.cfg["training"]["text_encoder"]
+        eval_cfg = self.cfg.get("evaluation", {})
 
         # Find the actual LoRA weights file (checkpoint may be a directory)
         ckpt_path = Path(checkpoint)
@@ -519,9 +520,10 @@ class PipelineOrchestrator:
         env = os.environ.copy()
         scripts_dir = str(script.parent.resolve())
         env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONIOENCODING"] = "utf-8"
 
         for i, ref in enumerate(i2v_refs):
-            out_path = eval_dir / f"i2v_{i:02d}.mp4"
+            out_path = samples_dir / f"step_{total_steps:06d}_i2v_{i}.mp4"
             cmd = [
                 sys.executable, str(script.resolve()),
                 "--checkpoint", str(Path(model_path).resolve()),
@@ -530,10 +532,12 @@ class PipelineOrchestrator:
                 "--condition-image", ref["image"],
                 "--prompt", ref["prompt"],
                 "--output", str(out_path),
-                "--height", "576", "--width", "576",
-                "--num-frames", "49",
-                "--guidance-scale", "4.0",
-                "--num-inference-steps", "30",
+                "--height", str(eval_cfg.get("height", 448)),
+                "--width", str(eval_cfg.get("width", 768)),
+                "--num-frames", str(eval_cfg.get("num_frames", 89)),
+                "--guidance-scale", str(eval_cfg.get("guidance_scale", 4.0)),
+                "--num-inference-steps", str(eval_cfg.get("num_inference_steps", 30)),
+                "--skip-audio",
             ]
 
             log.info("  I2V eval %d: %s -> %s", i, Path(ref["image"]).name, out_path.name)
