@@ -21,7 +21,7 @@ COMFYUI_URL = "http://127.0.0.1:8000"
 COMFYUI_LORAS_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/models/loras/ltx2")
 COMFYUI_INPUT_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/input")
 COMFYUI_OUTPUT_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/output")
-LORA_FILENAME = "autopilot_latest.safetensors"
+LORA_FILENAME = "x.safetensors"  # Matches the AIO workflow's lora_2 slot
 
 
 def is_running() -> bool:
@@ -77,6 +77,44 @@ def wait_for_completion(prompt_id: str, timeout: int = 900) -> dict | None:
     return None
 
 
+def build_aio_prompt(
+    prompt_text: str,
+    lora_name: str,
+    lora_strength: float = 1.0,
+    seed: int = 42,
+    output_prefix: str = "autopilot_eval",
+) -> dict | None:
+    """Load the full AIO workflow and modify prompt + LoRA."""
+    aio_path = Path(__file__).parent.parent / "workflow.json"
+    if not aio_path.exists():
+        log.warning("workflow.json not found — using simple workflow")
+        return None
+
+    wf = json.loads(aio_path.read_text(encoding="utf-8"))
+
+    # Update prompt text
+    if "92:3" in wf:
+        wf["92:3"]["inputs"]["text"] = prompt_text
+
+    # Update our LoRA in Power Lora Loader
+    if "523" in wf:
+        wf["523"]["inputs"]["lora_2"] = {
+            "on": True,
+            "lora": lora_name,
+            "strength": lora_strength,
+        }
+
+    # Update seed
+    if "109" in wf:
+        wf["109"]["inputs"]["seed"] = seed
+
+    # Update output prefix
+    if "141" in wf:
+        wf["141"]["inputs"]["filename_prefix"] = output_prefix
+
+    return wf
+
+
 def build_t2v_prompt(
     prompt_text: str,
     lora_name: str,
@@ -87,7 +125,12 @@ def build_t2v_prompt(
     seed: int = 42,
     output_prefix: str = "autopilot_eval",
 ) -> dict:
-    """Build a ComfyUI API prompt for t2v generation with our LoRA."""
+    """Build a ComfyUI API prompt — uses AIO workflow if available, else simple."""
+    aio = build_aio_prompt(prompt_text, lora_name, lora_strength, seed, output_prefix)
+    if aio:
+        return aio
+
+    # Fallback: simple workflow without upscaling
     return {
         "1": {
             "class_type": "DiffusionModelLoaderKJ",
