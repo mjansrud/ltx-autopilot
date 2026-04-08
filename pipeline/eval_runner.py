@@ -89,7 +89,6 @@ def run_eval(
     from ltx_trainer.model_loader import (
         load_model, load_embeddings_processor,
     )
-    from ltx_trainer.quantization import quantize_model
     from ltx_trainer.validation_sampler import GenerationConfig, ValidationSampler
 
     model_path = cfg["training"]["model_checkpoint"]
@@ -142,41 +141,81 @@ def run_eval(
     del state_dict
     gc.collect()
 
-    # Quantize with NF4 (compresses 44GB bf16 → ~10GB on GPU)
-    log.info("Quantizing with NF4...")
-    transformer = quantize_model(transformer, precision="nf4-bnb")
-    gc.collect()
-    log.info("Transformer on GPU: %.1f GB VRAM", torch.cuda.memory_allocated() / 1024**3)
-
-    # Apply chunked feedforward to reduce peak VRAM (like ComfyUI's LTXV Chunk FeedForward)
+    # Block swap: keep transformer on CPU, move blocks to GPU one at a time
+    # This lets us run inference with only ~2GB VRAM for the transformer
     import types
-    def _ffn_chunked_forward(self, x):
-        num_chunks = 4
-        if x.shape[1] > 4096:
-            chunk_size = x.shape[1] // num_chunks
-            for i in range(num_chunks):
-                start = i * chunk_size
-                end = (i + 1) * chunk_size if i < num_chunks - 1 else x.shape[1]
-                x[:, start:end] = self.net(x[:, start:end])
-            return x
-        return self.net(x)
 
     base_model = transformer
     if hasattr(transformer, 'get_base_model'):
         base_model = transformer.get_base_model()
+
     if hasattr(base_model, 'transformer_blocks'):
+        num_blocks = len(base_model.transformer_blocks)
+        log.info("Setting up block swap for %d transformer blocks", num_blocks)
+
+        # Keep all blocks on CPU
+        for block in base_model.transformer_blocks:
+            block.to("cpu")
+
+        # Monkey-patch _process_transformer_blocks to offload blocks
+        original_process = base_model._process_transformer_blocks
+
+        def _block_swap_process(self, video, audio, perturbations):
+            device = torch.device("cuda")
+            for i, block in enumerate(self.transformer_blocks):
+                block.to(device, non_blocking=True)
+                torch.cuda.synchronize()
+                video, audio = block(video=video, audio=audio, perturbations=perturbations)
+                block.to("cpu", non_blocking=True)
+            return video, audio
+
+        base_model._process_transformer_blocks = types.MethodType(_block_swap_process, base_model)
+
+        # Also apply chunked feedforward
+        def _ffn_chunked_forward(self, x):
+            num_chunks = 4
+            if x.shape[1] > 4096:
+                chunk_size = x.shape[1] // num_chunks
+                for i in range(num_chunks):
+                    start = i * chunk_size
+                    end = (i + 1) * chunk_size if i < num_chunks - 1 else x.shape[1]
+                    x[:, start:end] = self.net(x[:, start:end])
+                return x
+            return self.net(x)
+
         for block in base_model.transformer_blocks:
             block.ff.forward = types.MethodType(_ffn_chunked_forward, block.ff)
-        log.info("Applied chunked feedforward (%d chunks) to %d blocks", 4, len(base_model.transformer_blocks))
+
+        # Prevent ValidationSampler from moving entire transformer to GPU
+        # (block swap handles device management per-block)
+        _original_to = transformer.to
+        def _noop_to(*args, **kwargs):
+            # Only allow dtype changes, block device moves
+            if args and isinstance(args[0], torch.dtype):
+                return _original_to(*args, **kwargs)
+            if 'dtype' in kwargs and 'device' not in kwargs:
+                return _original_to(**kwargs)
+            return transformer
+        transformer.to = _noop_to
+
+        # Move non-block parts to GPU (patchify, proj_out, adaln, etc.)
+        for name, module in base_model.named_children():
+            if name != 'transformer_blocks':
+                module.to("cuda")
+
+        log.info("Block swap + chunked feedforward enabled")
+
+    gc.collect()
+    log.info("VRAM after setup: %.1f GB", torch.cuda.memory_allocated() / 1024**3)
 
     # VAE encoder loaded lazily for i2v (below)
 
-    # Get eval params — use moderate settings to fit in VRAM with NF4+LoRA
+    # Get eval params — block swap keeps VRAM low, can use full resolution
     width = eval_cfg.get("width", 768)
     height = eval_cfg.get("height", 448)
-    num_frames = min(eval_cfg.get("num_frames", 41), 41)  # Cap at 41 frames for NF4 eval
+    num_frames = eval_cfg.get("num_frames", 89)
     guidance_scale = eval_cfg.get("guidance_scale", 4.0)
-    num_steps = min(eval_cfg.get("num_inference_steps", 20), 20)  # Cap at 20 steps
+    num_steps = eval_cfg.get("num_inference_steps", 30)
 
     # Create sampler
     from ltx_trainer.progress import StandaloneSamplingProgress
