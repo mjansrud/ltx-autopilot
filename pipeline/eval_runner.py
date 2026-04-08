@@ -103,12 +103,23 @@ def run_eval(
         vae_checkpoint_path=vae_path,
         device="cpu",
         dtype=torch.bfloat16,
-        with_video_vae_encoder=do_i2v,
+        with_video_vae_encoder=False,  # Load separately to avoid mmap crash
         with_video_vae_decoder=True,
         with_audio_vae_decoder=False,
         with_vocoder=False,
         with_text_encoder=True,
     )
+
+    # Load VAE encoder separately if needed for i2v
+    import gc
+    gc.collect()
+    vae_encoder = None
+    if do_i2v:
+        from ltx_trainer.model_loader import load_video_vae_encoder
+        log.info("Loading VAE encoder for i2v...")
+        vae_encoder = load_video_vae_encoder(
+            vae_path or model_path, torch.device("cpu"), torch.bfloat16
+        )
 
     # Apply LoRA
     log.info("Loading LoRA: %s", checkpoint.name)
