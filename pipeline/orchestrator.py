@@ -461,21 +461,25 @@ class PipelineOrchestrator:
 
         if should_eval and checkpoint:
             with vram_stage("evaluation"):
-                log.info("[6/6] Evaluating LoRA at step %d...", new_total)
-                compare_base = self.state.should_compare_base(
-                    eval_cfg.get("compare_base_every_n_batches", 5)
-                )
-                self.evaluator.evaluate(checkpoint, batch, new_total, compare_base)
+                log.info("[6/6] Evaluating LoRA (t2v + i2v) at step %d...", new_total)
+                from .eval_runner import run_eval, find_latest_checkpoint as _find_ckpt
 
-                eval_dir = self.evaluator.output_dir / f"batch{batch:04d}_step{new_total:06d}_*"
-                # Find the actual eval dir (has timestamp)
-                eval_dirs = sorted(self.evaluator.output_dir.glob(f"batch{batch:04d}_*"))
-                if eval_dirs:
-                    dash.show_evaluation(eval_dirs[-1], eval_cfg.get("prompts", []))
-            # ── I2V eval: use refs from i2v_refs.json (next batch's unseen frames) ──
-            if i2v_refs and checkpoint:
-                log.info("[6b/6] Running I2V evaluation with %d unseen reference frames...", len(i2v_refs))
-                self._run_i2v_eval(i2v_refs, checkpoint, batch, new_total)
+                ckpt_path = Path(checkpoint)
+                if ckpt_path.is_dir():
+                    lora_files = sorted(ckpt_path.glob("lora_weights_*.safetensors"))
+                    ckpt_file = lora_files[-1] if lora_files else None
+                else:
+                    ckpt_file = ckpt_path
+
+                if ckpt_file:
+                    run_eval(
+                        config_path=str(self.config_path),
+                        checkpoint=ckpt_file,
+                        step=new_total,
+                        batch_dir=self.work_dir,
+                        do_t2v=True,
+                        do_i2v=bool(i2v_refs),
+                    )
 
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
