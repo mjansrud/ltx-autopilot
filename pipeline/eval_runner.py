@@ -191,6 +191,8 @@ def run_eval(
                     log.info("I2V %d: %s", i, Path(ref["image"]).name)
                     try:
                         image = open_image_as_srgb(ref["image"])
+                        # Resize to match target resolution
+                        image = image.resize((width, height))
                         condition_image = transforms.ToTensor()(image)
 
                         video, audio = sampler.generate(
