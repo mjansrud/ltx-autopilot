@@ -94,21 +94,23 @@ def run_eval(
 
     model_path = cfg["training"]["model_checkpoint"]
     text_encoder_path = cfg["training"]["text_encoder"]
+    vae_path = cfg["training"].get("vae_checkpoint")
 
-    log.info("Loading model...")
+    log.info("Loading model (split files)..." if vae_path else "Loading model...")
     components = load_model(
         checkpoint_path=model_path,
         text_encoder_path=text_encoder_path,
+        vae_checkpoint_path=vae_path,
         device="cpu",
         dtype=torch.bfloat16,
-        with_video_vae_encoder=False,  # Loaded lazily for i2v to save RAM
+        with_video_vae_encoder=do_i2v,
         with_video_vae_decoder=True,
         with_audio_vae_decoder=False,
         with_vocoder=False,
         with_text_encoder=True,
     )
 
-    # Apply LoRA using inference.py's load_lora_weights (auto-detects rank + modules)
+    # Apply LoRA
     log.info("Loading LoRA: %s", checkpoint.name)
     scripts_dir = str(Path(cfg["ltx_trainer_dir"]) / "scripts")
     if scripts_dir not in sys.path:
@@ -118,9 +120,10 @@ def run_eval(
     transformer = components.transformer.to(dtype=torch.bfloat16)
     transformer = load_lora_weights(transformer, str(checkpoint))
 
-    # Quantize with NF4 AFTER LoRA is applied
-    log.info("Quantizing transformer with NF4...")
-    transformer = quantize_model(transformer, precision="nf4-bnb")
+    # Only quantize with NF4 if using combined file (split files are small enough)
+    if not vae_path:
+        log.info("Quantizing transformer with NF4...")
+        transformer = quantize_model(transformer, precision="nf4-bnb")
 
     # Get eval params
     width = eval_cfg.get("width", 768)
@@ -172,15 +175,6 @@ def run_eval(
             if not i2v_refs:
                 log.warning("No i2v refs found, skipping i2v eval")
             else:
-                # Load VAE encoder lazily for i2v (saves RAM during t2v)
-                import gc
-                if sampler._vae_encoder is None:
-                    log.info("Loading VAE encoder for i2v...")
-                    gc.collect()
-                    from ltx_trainer.model_loader import load_video_vae_encoder
-                    vae_enc = load_video_vae_encoder(model_path, "cpu", torch.bfloat16)
-                    sampler._vae_encoder = vae_enc
-
                 from torchvision import transforms
                 from ltx_trainer.utils import open_image_as_srgb
 
