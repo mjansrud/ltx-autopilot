@@ -375,6 +375,14 @@ class PipelineOrchestrator:
                     scene_videos = videos
                 dash.show_scene_split(len(videos), len(scene_videos), split_dir)
 
+        # Cap total clips per batch
+        max_clips = self.cfg.get("scene_split", {}).get("max_clips_per_batch", 0)
+        if max_clips and len(scene_videos) > max_clips:
+            import random
+            random.shuffle(scene_videos)
+            scene_videos = sorted(scene_videos[:max_clips])
+            log.info("Capped to %d clips (from %d)", max_clips, len(scene_videos))
+
         # ── Start prefetch early so scenes are ready by end of captioning ──
         next_batch = self.state.batch_num + 1
         log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
