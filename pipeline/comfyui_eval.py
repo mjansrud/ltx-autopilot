@@ -114,40 +114,45 @@ def build_aio_prompt(
     output_prefix: str = "autopilot_eval",
     condition_image: str | None = None,
 ) -> dict | None:
-    """Load the full AIO workflow and modify prompt + LoRA."""
-    aio_path = Path(__file__).parent.parent / "workflow.json"
-    if not aio_path.exists():
-        log.warning("workflow.json not found — using simple workflow")
+    """Load the full two-step upscale workflow and modify prompt + LoRA."""
+    wf_path = Path(__file__).parent.parent / "workflow-alt.json"
+    if not wf_path.exists():
+        log.warning("workflow-alt.json not found — using simple workflow")
         return None
 
-    wf = json.loads(aio_path.read_text(encoding="utf-8"))
+    wf = json.loads(wf_path.read_text(encoding="utf-8"))
 
     # Update prompt text
-    if "92:3" in wf:
-        wf["92:3"]["inputs"]["text"] = prompt_text
+    if "28" in wf:
+        wf["28"]["inputs"]["text"] = prompt_text
 
-    # Update our LoRA in Power Lora Loader
-    if "523" in wf:
-        wf["523"]["inputs"]["lora_2"] = {
+    # Add our trained LoRA to Power Lora Loader (node 7 — second loader in chain)
+    if "7" in wf:
+        wf["7"]["inputs"]["lora_2"] = {
             "on": True,
-            "lora": lora_name,
+            "lora": lora_name.replace(os.sep, "\\"),  # ComfyUI expects backslashes
             "strength": lora_strength,
         }
 
-    # Update seed
-    if "109" in wf:
-        wf["109"]["inputs"]["seed"] = seed
+    # Set chunk feedforward to 16
+    if "8" in wf:
+        wf["8"]["inputs"]["chunks"] = 16
 
-    # Update output prefix
-    if "141" in wf:
-        wf["141"]["inputs"]["filename_prefix"] = output_prefix
+    # Update seed
+    if "125" in wf:
+        wf["125"]["inputs"]["seed"] = seed
+
+    # Update output prefixes
+    for node_id in ["59", "61"]:
+        if node_id in wf:
+            wf[node_id]["inputs"]["filename_prefix"] = output_prefix
 
     # Update conditioning image for i2v
-    if condition_image and "98" in wf:
+    if condition_image and "15" in wf:
         img_src = Path(condition_image)
         img_dst = COMFYUI_INPUT_DIR / img_src.name
         shutil.copy2(img_src, img_dst)
-        wf["98"]["inputs"]["image"] = img_src.name
+        wf["15"]["inputs"]["image"] = img_src.name
 
     return wf
 
