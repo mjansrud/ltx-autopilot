@@ -99,7 +99,7 @@ def run_eval(
     import gc
     from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
 
-    # Load transformer with LoRA fused, move to GPU immediately to free CPU RAM
+    # Load transformer with LoRA fused on CPU
     log.info("Loading transformer + fusing LoRA...")
     from ltx_core.model.transformer.model_configurator import (
         LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator,
@@ -109,7 +109,10 @@ def run_eval(
         model_class_configurator=LTXModelConfigurator,
         model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
     ).lora(str(checkpoint)).build(device=torch.device("cpu"), dtype=torch.bfloat16)
-    transformer = transformer.to("cuda")
+
+    # Quantize with NF4 to fit in 32GB VRAM
+    log.info("Quantizing with NF4...")
+    transformer = quantize_model(transformer, precision="nf4-bnb")
     gc.collect()
     log.info("Transformer on GPU: %.1f GB VRAM", torch.cuda.memory_allocated() / 1024**3)
 
