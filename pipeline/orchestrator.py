@@ -393,15 +393,17 @@ class PipelineOrchestrator:
                 # Caption prefetched next batch while Omni is still loaded
                 self._caption_prefetched_batch(batch + 1)
 
-                # Generate i2v refs from next batch (unseen, already captioned)
-                self._generate_i2v_refs(batch)
-
                 # Generate search query for next crawl while model is still loaded
                 self.crawler.generate_next_query(batch + 1)
 
                 # Now unload captioner
                 self.captioner.unload()
                 flush_vram()
+
+        # Generate i2v refs (works with or without cache — just needs metadata)
+        i2v_dir = self.work_dir / "i2v"
+        if not i2v_dir.exists():
+            self._generate_i2v_refs(batch)
                 dash.show_vram_status("after caption model unload", get_vram_usage())
 
                 # Show the generated captions

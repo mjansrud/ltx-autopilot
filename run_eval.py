@@ -79,6 +79,9 @@ def run_i2v_eval(cfg, checkpoint: Path, step: int):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(script.parent.resolve()) + os.pathsep + env.get("PYTHONPATH", "")
     env["PYTHONIOENCODING"] = "utf-8"
+    # Force correct venv (cwd inside LTX-2 would pick up LTX-2/.venv)
+    venv_root = str(Path(sys.executable).parent.parent.resolve())
+    env["VIRTUAL_ENV"] = venv_root
 
     for i, ref in enumerate(i2v_refs[:2]):
         out_path = eval_dir / f"i2v_{i:02d}.mp4"
