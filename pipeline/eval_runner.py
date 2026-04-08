@@ -96,6 +96,7 @@ def run_eval(
     text_encoder_path = cfg["training"]["text_encoder"]
     video_vae_path = cfg["training"].get("video_vae_checkpoint")
     audio_vae_path = cfg["training"].get("audio_vae_checkpoint")
+    text_projection_path = cfg["training"].get("text_projection_checkpoint")
 
     import gc
 
@@ -107,6 +108,7 @@ def run_eval(
         text_encoder_path=text_encoder_path,
         video_vae_path=video_vae_path,
         audio_vae_path=audio_vae_path,
+        text_projection_path=text_projection_path,
         device="cpu",
         dtype=torch.bfloat16,
         with_video_vae_encoder=do_i2v,
