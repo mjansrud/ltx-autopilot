@@ -490,62 +490,27 @@ class PipelineOrchestrator:
         return True
 
     def _run_i2v_eval(self, i2v_refs: list[dict], checkpoint: str, batch: int, total_steps: int):
-        """Run I2V inference using saved reference frames + their captions."""
-        import sys, os
+        """Run I2V inference using the shared eval runner."""
+        from .eval_runner import run_eval, find_latest_checkpoint
 
-        script = Path(self.cfg["ltx_trainer_dir"]) / "scripts" / "inference.py"
-        if not script.exists():
-            log.warning("inference.py not found, skipping I2V eval")
-            return
-
-        samples_dir = self.work_dir / "samples"
-        samples_dir.mkdir(parents=True, exist_ok=True)
-
-        model_path = self.cfg["training"]["model_checkpoint"]
-        text_encoder = self.cfg["training"]["text_encoder"]
-        eval_cfg = self.cfg.get("evaluation", {})
-
-        # Find the actual LoRA weights file (checkpoint may be a directory)
         ckpt_path = Path(checkpoint)
         if ckpt_path.is_dir():
             lora_files = sorted(ckpt_path.glob("lora_weights_*.safetensors"))
-            if lora_files:
-                lora_path = str(lora_files[-1].resolve())
-            else:
+            if not lora_files:
                 log.warning("No lora_weights found in %s, skipping I2V eval", checkpoint)
                 return
+            ckpt_file = lora_files[-1]
         else:
-            lora_path = str(ckpt_path.resolve())
+            ckpt_file = ckpt_path
 
-        env = os.environ.copy()
-        scripts_dir = str(script.parent.resolve())
-        env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
-        env["PYTHONIOENCODING"] = "utf-8"
-
-        for i, ref in enumerate(i2v_refs):
-            out_path = samples_dir / f"step_{total_steps:06d}_i2v_{i}.mp4"
-            cmd = [
-                sys.executable, str(script.resolve()),
-                "--checkpoint", str(Path(model_path).resolve()),
-                "--text-encoder-path", str(Path(text_encoder).resolve()),
-                "--lora-path", lora_path,
-                "--condition-image", ref["image"],
-                "--prompt", ref["prompt"],
-                "--output", str(out_path),
-                "--height", str(eval_cfg.get("height", 448)),
-                "--width", str(eval_cfg.get("width", 768)),
-                "--num-frames", str(eval_cfg.get("num_frames", 89)),
-                "--guidance-scale", str(eval_cfg.get("guidance_scale", 4.0)),
-                "--num-inference-steps", str(eval_cfg.get("num_inference_steps", 30)),
-                "--skip-audio",
-            ]
-
-            log.info("  I2V eval %d: %s -> %s", i, Path(ref["image"]).name, out_path.name)
-            result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=env)
-            if result.returncode != 0:
-                log.warning("  I2V eval failed: %s", (result.stderr or "")[-300:])
-            else:
-                log.info("  I2V eval %d complete: %s", i, out_path)
+        run_eval(
+            config_path=str(self.config_path),
+            checkpoint=ckpt_file,
+            step=total_steps,
+            batch_dir=self.work_dir,
+            do_t2v=False,
+            do_i2v=True,
+        )
 
     def run(self, max_batches: int | None = None):
         """Run the continuous training loop."""
