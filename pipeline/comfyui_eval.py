@@ -8,6 +8,7 @@ and saves the output video to the batch's samples folder.
 
 import json
 import logging
+import os
 import shutil
 import time
 import urllib.request
@@ -21,7 +22,7 @@ COMFYUI_URL = "http://127.0.0.1:8000"
 COMFYUI_LORAS_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/models/loras/ltx2")
 COMFYUI_INPUT_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/input")
 COMFYUI_OUTPUT_DIR = Path("C:/Users/morte/Projects/playground/ComfyUI/output")
-LORA_FILENAME = "x.safetensors"  # Matches the AIO workflow's lora_2 slot
+LORA_FILENAME = "autopilot_eval.safetensors"
 
 
 COMFYUI_EXE = Path("C:/Users/morte/AppData/Local/Programs/ComfyUI/ComfyUI.exe")
@@ -64,7 +65,8 @@ def copy_lora(checkpoint: Path) -> str:
     dst = COMFYUI_LORAS_DIR / LORA_FILENAME
     shutil.copy2(checkpoint, dst)
     log.info("Copied LoRA to %s", dst)
-    return f"ltx2\\{LORA_FILENAME}"
+    import os as _os
+    return f"ltx2{_os.sep}{LORA_FILENAME}"
 
 
 def queue_prompt(prompt: dict) -> str:
@@ -170,7 +172,7 @@ def build_t2v_prompt(
         "1": {
             "class_type": "DiffusionModelLoaderKJ",
             "inputs": {
-                "model_name": "ltx2\\ltx-2.3-22b-dev_transformer_only_bf16.safetensors",
+                "model_name": os.sep.join(["ltx2", "ltx-2.3-22b-dev_transformer_only_bf16.safetensors"]),
                 "weight_dtype": "default",
                 "compute_dtype": "default",
                 "patch_cublaslinear": False,
@@ -200,7 +202,7 @@ def build_t2v_prompt(
             "class_type": "LoraLoaderModelOnly",
             "inputs": {
                 "model": ["1", 0],
-                "lora_name": "ltx2\\ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors",
+                "lora_name": os.sep.join(["ltx2", "ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors"]),
                 "strength_model": 0.6,
             }
         },
