@@ -97,35 +97,51 @@ def run_eval(
     vae_path = cfg["training"].get("vae_checkpoint")
 
     import gc
-    from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder
 
-    # Load transformer with LoRA fused on CPU
-    log.info("Loading transformer + fusing LoRA...")
-    from ltx_core.model.transformer.model_configurator import (
-        LTXV_MODEL_COMFY_RENAMING_MAP, LTXModelConfigurator,
+    # Load all components (single mmap avoids repeated file opens)
+    # This loads transformer + VAE + text encoder + embeddings processor in one pass
+    log.info("Loading all components (single mmap)...")
+    components = load_model(
+        checkpoint_path=model_path,
+        text_encoder_path=text_encoder_path,
+        device="cpu",
+        dtype=torch.bfloat16,
+        with_video_vae_encoder=False,  # Loaded separately for i2v
+        with_video_vae_decoder=True,
+        with_audio_vae_decoder=False,
+        with_vocoder=False,
+        with_text_encoder=True,
     )
-    transformer = SingleGPUModelBuilder(
-        model_path=str(Path(model_path).resolve()),
-        model_class_configurator=LTXModelConfigurator,
-        model_sd_ops=LTXV_MODEL_COMFY_RENAMING_MAP,
-    ).lora(str(checkpoint)).build(device=torch.device("cpu"), dtype=torch.bfloat16)
 
-    # Quantize with NF4 to fit in 32GB VRAM
+    transformer = components.transformer.to(dtype=torch.bfloat16)
+    vae_decoder = components.video_vae_decoder
+    text_encoder = components.text_encoder
+
+    # Apply LoRA via PEFT then quantize
+    log.info("Applying LoRA: %s", checkpoint.name)
+    import re as _re
+    from safetensors.torch import load_file
+    from peft import LoraConfig, get_peft_model, set_peft_model_state_dict
+
+    state_dict = load_file(str(checkpoint))
+    state_dict = {k.replace("diffusion_model.", "", 1): v for k, v in state_dict.items()}
+    target_modules = sorted({m.group(1) for k in state_dict
+                            for m in [_re.match(r"(.+)\.lora_[AB]\.", k)] if m})
+    lora_rank = next(v.shape[0] for k, v in state_dict.items() if "lora_A" in k and v.ndim == 2)
+    log.info("LoRA rank=%d, %d target modules", lora_rank, len(target_modules))
+
+    lora_config = LoraConfig(r=lora_rank, lora_alpha=lora_rank,
+                             target_modules=target_modules, lora_dropout=0.0)
+    transformer = get_peft_model(transformer, lora_config)
+    set_peft_model_state_dict(transformer.get_base_model(), state_dict)
+    del state_dict
+    gc.collect()
+
+    # Quantize with NF4
     log.info("Quantizing with NF4...")
     transformer = quantize_model(transformer, precision="nf4-bnb")
     gc.collect()
     log.info("Transformer on GPU: %.1f GB VRAM", torch.cuda.memory_allocated() / 1024**3)
-
-    # Load small components (VAE, text encoder) — transformer is off CPU now
-    log.info("Loading VAE decoder...")
-    from ltx_trainer.model_loader import load_video_vae_decoder, load_text_encoder, load_embeddings_processor
-    vae_decoder = load_video_vae_decoder(model_path, "cpu", torch.bfloat16)
-    gc.collect()
-
-    log.info("Loading text encoder + embeddings processor...")
-    text_encoder = load_text_encoder(text_encoder_path, "cpu", torch.bfloat16)
-    text_encoder.embeddings_processor = load_embeddings_processor(model_path, "cpu", torch.bfloat16)
-    gc.collect()
 
     # VAE encoder loaded lazily for i2v (below)
 
