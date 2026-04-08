@@ -393,17 +393,15 @@ class PipelineOrchestrator:
                 # Caption prefetched next batch while Omni is still loaded
                 self._caption_prefetched_batch(batch + 1)
 
+                # Generate i2v refs from next batch (unseen, already captioned)
+                self._generate_i2v_refs(batch)
+
                 # Generate search query for next crawl while model is still loaded
                 self.crawler.generate_next_query(batch + 1)
 
                 # Now unload captioner
                 self.captioner.unload()
                 flush_vram()
-
-        # Generate i2v refs (works with or without cache — just needs metadata)
-        i2v_dir = self.work_dir / "i2v"
-        if not i2v_dir.exists():
-            self._generate_i2v_refs(batch)
                 dash.show_vram_status("after caption model unload", get_vram_usage())
 
                 # Show the generated captions
@@ -469,21 +467,23 @@ class PipelineOrchestrator:
                 ckpt_file = ckpt_path
 
             if ckpt_file:
-                from .comfyui_eval import run_eval as comfyui_eval, is_running as comfyui_running
-                eval_cfg = self.cfg.get("evaluation", {})
-                if comfyui_running():
-                    comfyui_eval(
-                        checkpoint=ckpt_file,
-                        step=new_total,
-                        output_dir=self.work_dir / "samples",
-                        prompts=eval_cfg.get("prompts", []),
-                        i2v_refs=i2v_refs,
-                        width=eval_cfg.get("width", 768),
-                        height=eval_cfg.get("height", 448),
-                        num_frames=eval_cfg.get("num_frames", 89),
-                    )
-                else:
-                    log.warning("ComfyUI not running — skipping eval")
+                try:
+                    from .comfyui_eval import run_eval as comfyui_eval, is_running as comfyui_running
+                    if comfyui_running():
+                        comfyui_eval(
+                            checkpoint=ckpt_file,
+                            step=new_total,
+                            output_dir=self.work_dir / "samples",
+                            prompts=eval_cfg.get("prompts", []),
+                            i2v_refs=i2v_refs,
+                            width=eval_cfg.get("width", 768),
+                            height=eval_cfg.get("height", 448),
+                            num_frames=eval_cfg.get("num_frames", 89),
+                        )
+                    else:
+                        log.warning("ComfyUI not running — skipping eval")
+                except Exception as e:
+                    log.error("Eval failed: %s", e)
 
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
@@ -498,27 +498,46 @@ class PipelineOrchestrator:
         return True
 
     def _run_i2v_eval(self, i2v_refs: list[dict], checkpoint: str, batch: int, total_steps: int):
-        """Run I2V inference using the shared eval runner."""
-        from .eval_runner import run_eval, find_latest_checkpoint
+        """Run I2V inference using saved reference frames + their captions."""
+        import sys, os
 
-        ckpt_path = Path(checkpoint)
-        if ckpt_path.is_dir():
-            lora_files = sorted(ckpt_path.glob("lora_weights_*.safetensors"))
-            if not lora_files:
-                log.warning("No lora_weights found in %s, skipping I2V eval", checkpoint)
-                return
-            ckpt_file = lora_files[-1]
-        else:
-            ckpt_file = ckpt_path
+        script = Path(self.cfg["ltx_trainer_dir"]) / "scripts" / "inference.py"
+        if not script.exists():
+            log.warning("inference.py not found, skipping I2V eval")
+            return
 
-        run_eval(
-            config_path=str(self.config_path),
-            checkpoint=ckpt_file,
-            step=total_steps,
-            batch_dir=self.work_dir,
-            do_t2v=False,
-            do_i2v=True,
-        )
+        eval_dir = self.work_dir / f"i2v_step{total_steps:06d}"
+        eval_dir.mkdir(parents=True, exist_ok=True)
+
+        model_path = self.cfg["training"]["model_checkpoint"]
+        text_encoder = self.cfg["training"]["text_encoder"]
+
+        env = os.environ.copy()
+        scripts_dir = str(script.parent.resolve())
+        env["PYTHONPATH"] = scripts_dir + os.pathsep + env.get("PYTHONPATH", "")
+
+        for i, ref in enumerate(i2v_refs):
+            out_path = eval_dir / f"i2v_{i:02d}.mp4"
+            cmd = [
+                sys.executable, str(script.resolve()),
+                "--checkpoint", str(Path(model_path).resolve()),
+                "--text-encoder-path", str(Path(text_encoder).resolve()),
+                "--lora-path", str(Path(checkpoint).resolve()),
+                "--condition-image", ref["image"],
+                "--prompt", ref["prompt"],
+                "--output", str(out_path),
+                "--height", "576", "--width", "576",
+                "--num-frames", "49",
+                "--guidance-scale", "4.0",
+                "--num-inference-steps", "30",
+            ]
+
+            log.info("  I2V eval %d: %s -> %s", i, Path(ref["image"]).name, out_path.name)
+            result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", env=env)
+            if result.returncode != 0:
+                log.warning("  I2V eval failed: %s", (result.stderr or "")[-300:])
+            else:
+                log.info("  I2V eval %d complete: %s", i, out_path)
 
     def run(self, max_batches: int | None = None):
         """Run the continuous training loop."""
