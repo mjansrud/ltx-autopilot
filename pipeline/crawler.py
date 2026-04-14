@@ -354,7 +354,98 @@ class VideoCrawler:
         except (ValueError, AttributeError):
             return None
 
-    def _collect_video_urls(self, batch_num: int) -> list[dict]:
+    def search_candidates(self, batch_num: int, limit: int | None = None) -> list[dict]:
+        """Search Lustpress and return ranked candidate dicts (soft-scored).
+
+        `limit` caps the returned pool. Defaults to `max_per_batch` (download budget).
+        Pass a larger limit when you want a pool for LLM ranking.
+        """
+        return self._collect_video_urls(batch_num, limit=limit)
+
+    def download_candidates(self, candidates: list[dict], output_dir: Path) -> list[Path]:
+        """Public alias: download pre-selected candidates in parallel."""
+        if not candidates:
+            log.warning("No candidates to download")
+            return []
+        videos = self._download_videos(candidates, output_dir)
+        log.info("Downloaded %d/%d videos to %s", len(videos), len(candidates), output_dir)
+        return videos
+
+    def llm_rank_candidates(self, candidates: list[dict], top_n: int,
+                            focus: str | None = None, consider: int = 10) -> list[dict]:
+        """Use the loaded captioner LLM to rank candidates by relevance to the focus.
+
+        Only considers the top `consider` candidates from the soft-scored input
+        (keeps the LLM task small for a small model). Returns the LLM-ranked top_n
+        followed by the remainder in their original order as tail-fill.
+
+        Falls back to the input order on ANY failure (missing captioner, parse error,
+        empty pool). Never raises.
+        """
+        if not candidates:
+            return candidates
+        if self._captioner is None or not self._captioner.is_loaded():
+            log.debug("[LLM-RANK] Captioner not loaded — using soft-score order")
+            return candidates[:top_n]
+
+        focus = (focus or self.focus).strip()
+        if not focus:
+            return candidates[:top_n]
+
+        # LLM sees only the head of the soft-scored pool — small models do badly
+        # on long ranking tasks, so cap at `consider`.
+        head = candidates[:consider]
+        tail = candidates[consider:]
+
+        title_block = "\n".join(
+            f"{i+1}. {(c.get('title') or '').strip()[:120]}"
+            for i, c in enumerate(head)
+        )
+        prompt = (
+            "You are filtering adult video search results. Score each title 0-5 for how "
+            "well it matches the FOCUS below. A higher score means the title clearly describes "
+            "the focus. Score 0 if the title is off-topic or unrelated.\n\n"
+            f"FOCUS:\n{focus}\n\n"
+            f"TITLES:\n{title_block}\n\n"
+            "Output one line per title in the format 'N:score' (e.g. '1:5'). "
+            "Only output the scores, nothing else.\n\n"
+            "Scores:"
+        )
+
+        try:
+            result = self._captioner.generate_text(prompt, max_new_tokens=200, temperature=0.2)
+        except Exception as e:
+            log.warning("[LLM-RANK] generate_text failed: %s — falling back to soft scores", e)
+            return candidates[:top_n]
+
+        # Parse "N:score" lines (tolerant of whitespace, commas, labels)
+        import re as _re
+        scores: dict[int, int] = {}
+        for line in result.splitlines():
+            m = _re.search(r"(\d+)\s*[:\-=]\s*(\d+)", line)
+            if m:
+                idx = int(m.group(1)) - 1
+                score = int(m.group(2))
+                if 0 <= idx < len(head):
+                    scores[idx] = max(0, min(5, score))
+
+        if not scores:
+            log.warning("[LLM-RANK] Parsed 0 scores from LLM output: %r — falling back", result[:200])
+            return candidates[:top_n]
+
+        # Rank head by LLM score desc, stable on original order for ties.
+        indexed = list(enumerate(head))
+        indexed.sort(key=lambda x: scores.get(x[0], 0), reverse=True)
+        ranked_head = [c for _, c in indexed]
+
+        score_summary = ",".join(str(scores.get(i, 0)) for i in range(len(head)))
+        log.info("[LLM-RANK] Ranked %d/%d candidates. Scores: [%s]",
+                 len(scores), len(head), score_summary)
+
+        combined = ranked_head + tail
+        return combined[:top_n]
+
+    def _collect_video_urls(self, batch_num: int, limit: int | None = None) -> list[dict]:
         """Search Lustpress and collect video page URLs."""
         import random
         seen = self._load_seen()
@@ -471,15 +562,20 @@ class VideoCrawler:
                     })
                     log.info("[CUSTOM] Injecting: %s", url[:80])
 
-        # Deduplicate and limit
+        # Deduplicate, preserving score order from above
         unique = {}
         for c in candidates:
             if c["url"] not in unique:
                 unique[c["url"]] = c
-        candidates = list(unique.values())[:self.max_per_batch]
+        deduped = list(unique.values())
 
-        log.info("Collected %d candidate video URLs", len(candidates))
-        return candidates
+        # Apply the caller's cap. Default is the download budget (max_per_batch);
+        # callers that want a larger pool for LLM ranking pass a higher limit.
+        cap = limit if limit is not None else self.max_per_batch
+        deduped = deduped[:cap]
+
+        log.info("Collected %d candidate video URLs (cap=%d)", len(deduped), cap)
+        return deduped
 
     def _download_one(self, item: dict, output_dir: Path) -> Path | None:
         """Download a single video. Returns path if successful, None otherwise."""

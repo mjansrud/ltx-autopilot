@@ -447,10 +447,11 @@ class PipelineOrchestrator:
             dash.show_scene_split(len(videos), len(scene_videos), scenes_dir if scenes_dir.exists() else raw_dir)
         else:
             # Generate search query using captioner if no pre-generated one exists.
-            # Piggyback eval-prompt gen on the same load if this batch will evaluate.
+            # Piggyback eval-prompt gen AND LLM candidate ranking on the same load.
             query_file = Path("./workspace") / "next_query.txt"
             need_query = not query_file.exists()
             need_eval_prompts = will_eval and not eval_prompts_file.exists()
+            ranked_candidates: list[dict] | None = None
             if need_query or need_eval_prompts:
                 log.info("[LLM] Loading captioner for aux gen (query=%s, eval_prompts=%s)",
                          need_query, need_eval_prompts)
@@ -460,13 +461,29 @@ class PipelineOrchestrator:
                         self.crawler.generate_next_query(batch)
                     if need_eval_prompts:
                         self._generate_eval_prompts()
+                    # Captioner is loaded — do the search + LLM-rank here so the
+                    # download step gets a smarter candidate ordering than pure
+                    # keyword soft scoring can provide.
+                    pool = self.crawler.search_candidates(
+                        batch, limit=self.crawler.max_per_batch * 4
+                    )
+                    if pool:
+                        ranked_candidates = self.crawler.llm_rank_candidates(
+                            pool, top_n=self.crawler.max_per_batch, consider=10
+                        )
                 finally:
                     self.captioner.unload()
                     flush_vram()
 
             with vram_stage("crawl", False):
                 log.info("[1/6] Crawling videos via Lustpress...")
-                videos = self.crawler.crawl(batch, raw_dir)
+                if ranked_candidates:
+                    log.info("Using %d LLM-ranked candidates", len(ranked_candidates))
+                    videos = self.crawler.download_candidates(ranked_candidates, raw_dir)
+                else:
+                    # Fallback: no LLM ranking performed this batch — use
+                    # the plain crawl() path with soft scoring only.
+                    videos = self.crawler.crawl(batch, raw_dir)
                 if not videos:
                     log.warning("No videos downloaded. Waiting before retry...")
                     return False

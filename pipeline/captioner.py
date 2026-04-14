@@ -111,8 +111,14 @@ class TransformersCaptioner:
         self.model = None
         self.processor = None
 
+    def is_loaded(self) -> bool:
+        return self.model is not None
+
     def load(self):
-        """Load model and processor onto GPU."""
+        """Load model and processor onto GPU. Idempotent — no-op if already loaded."""
+        if self.model is not None:
+            log.debug("Captioner already loaded, skipping load()")
+            return
         import torch
         from transformers import AutoProcessor, AutoModelForCausalLM, BitsAndBytesConfig
 
