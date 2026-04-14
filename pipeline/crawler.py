@@ -469,17 +469,9 @@ class VideoCrawler:
         sort = random.choice(["mr", "mv"])  # most recent, most viewed
         log.info("Search params: query='%s', page=%d, sort=%s", query, page, sort)
 
-        # Build a keyword set from the query for soft title scoring.
-        # Stopwords are generic English fillers + camera/shot descriptors (which
-        # appear in titles constantly as "close-up", "pov shot", etc., and would
-        # otherwise create spurious matches unrelated to the actual content).
-        _stop = {"the", "and", "for", "with", "from",
-                 "pov", "close", "shot", "view", "angle", "extreme", "tight"}
-        query_keywords = {w for w in query.lower().split()
-                          if w and w not in _stop and len(w) >= 3}
-        log.info("Query keywords for title scoring: %s", sorted(query_keywords))
-
-        # Search across configured sources (shuffled order for variety)
+        # Search across configured sources (shuffled order for variety).
+        # Ranking happens in llm_rank_candidates() in the caller — this method
+        # only collects and returns the raw (search-order) candidate pool.
         sources = list(self.sources)
         random.shuffle(sources)
         for source in sources:
@@ -515,22 +507,6 @@ class VideoCrawler:
             if len(candidates) >= self.max_per_batch * 4:
                 break
 
-        # Soft relevance scoring: rank by title/query keyword overlap.
-        # Never rejects — low-score candidates just sink to the bottom and
-        # only pull through if there's room under max_per_batch.
-        def _score(title: str) -> int:
-            t = title.lower()
-            return sum(1 for kw in query_keywords if kw in t)
-
-        if query_keywords and candidates:
-            scored = [(_score(c["title"]), c) for c in candidates]
-            scored.sort(key=lambda x: x[0], reverse=True)
-            top_score = scored[0][0] if scored else 0
-            zero_score = sum(1 for s, _ in scored if s == 0)
-            log.info("Title scoring: %d candidates, top match=%d kw hits, %d with 0 hits",
-                     len(scored), top_score, zero_score)
-            candidates = [c for _, c in scored]
-
         # Also grab some random videos if configured
         if self.use_random and len(candidates) < self.max_per_batch:
             for source in self.sources[:2]:
@@ -562,7 +538,7 @@ class VideoCrawler:
                     })
                     log.info("[CUSTOM] Injecting: %s", url[:80])
 
-        # Deduplicate, preserving score order from above
+        # Deduplicate
         unique = {}
         for c in candidates:
             if c["url"] not in unique:

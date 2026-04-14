@@ -380,16 +380,30 @@ class PipelineOrchestrator:
         """
         Run one complete batch. Returns True if successful.
 
-        Memory lifecycle:
-          1. Crawl + Split       — no GPU needed (Lustpress + yt-dlp + ffmpeg)
-                                   (prefetched in background during previous batch's training)
-          2. Caption             — captioner model LOADED then UNLOADED
-          3. Preprocess          — uses LTX VAE/encoder (subprocess, separate process memory)
-          4. Train               — training occupies GPU (subprocess)
-                                   (prefetch NEXT batch starts here in background)
-          5. Evaluate            — inference pipeline loaded then unloaded (subprocess)
-          6. Cleanup             — free disk
+        Memory lifecycle (fresh-download path):
+          1. Captioner LOAD       — covers query gen + eval prompts + LLM rank
+                                    + crawl + split + captioning (single load)
+          2. Crawl + Split        — CPU only (yt-dlp + ffmpeg); captioner idle in VRAM
+          3. Caption              — same loaded captioner captions clips, then UNLOADS
+          4. Preprocess           — uses LTX VAE/encoder (subprocess, separate memory)
+          5. Train                — training occupies GPU (subprocess)
+          6. Evaluate             — inference pipeline loaded then unloaded (subprocess)
+          7. Cleanup              — free disk
+        Cached-recovery path skips 1-3 and uses a smaller auxiliary load only if
+        the LLM is needed for query/eval-prompt gen.
         """
+        try:
+            return self._run_batch_inner()
+        finally:
+            # Safety net: if anything raised between captioner.load() and the
+            # captioning block's terminal unload, ensure the model isn't left
+            # sitting in VRAM where it would conflict with training subprocesses.
+            if self.captioner.is_loaded():
+                log.warning("[SAFETY] Captioner still loaded at end of run_batch — unloading")
+                self.captioner.unload()
+                flush_vram()
+
+    def _run_batch_inner(self) -> bool:
         batch = self.state.batch_num
         step = self.state.total_steps
         # Update root logger prefix so all sub-component logs include batch/step
@@ -446,44 +460,35 @@ class PipelineOrchestrator:
             log.info("[1-2/6] Using prefetched data: %d videos, %d scenes", len(videos), len(scene_videos))
             dash.show_scene_split(len(videos), len(scene_videos), scenes_dir if scenes_dir.exists() else raw_dir)
         else:
-            # Generate search query using captioner if no pre-generated one exists.
-            # Piggyback eval-prompt gen AND LLM candidate ranking on the same load.
+            # Load captioner ONCE for the whole fresh-download flow: query gen,
+            # eval prompts, LLM candidate ranking, AND captioning (later in
+            # run_batch). It stays loaded across the CPU-only crawl + split phases
+            # (~7 GB idle in VRAM, no GPU conflict since yt-dlp/ffmpeg are CPU).
+            # The captioning block's terminal unload() is the single cleanup point;
+            # run_batch's finally block is a safety net on exceptions.
+            log.info("[LLM] Loading captioner for fresh-download (covers gen + rank + captioning)")
+            self.captioner.load()
+
             query_file = Path("./workspace") / "next_query.txt"
-            need_query = not query_file.exists()
-            need_eval_prompts = will_eval and not eval_prompts_file.exists()
-            ranked_candidates: list[dict] | None = None
-            if need_query or need_eval_prompts:
-                log.info("[LLM] Loading captioner for aux gen (query=%s, eval_prompts=%s)",
-                         need_query, need_eval_prompts)
-                self.captioner.load()
-                try:
-                    if need_query:
-                        self.crawler.generate_next_query(batch)
-                    if need_eval_prompts:
-                        self._generate_eval_prompts()
-                    # Captioner is loaded — do the search + LLM-rank here so the
-                    # download step gets a smarter candidate ordering than pure
-                    # keyword soft scoring can provide.
-                    pool = self.crawler.search_candidates(
-                        batch, limit=self.crawler.max_per_batch * 4
-                    )
-                    if pool:
-                        ranked_candidates = self.crawler.llm_rank_candidates(
-                            pool, top_n=self.crawler.max_per_batch, consider=10
-                        )
-                finally:
-                    self.captioner.unload()
-                    flush_vram()
+            if not query_file.exists():
+                self.crawler.generate_next_query(batch)
+            if will_eval and not eval_prompts_file.exists():
+                self._generate_eval_prompts()
+
+            # Search + LLM-rank candidates while the captioner is loaded.
+            pool = self.crawler.search_candidates(
+                batch, limit=self.crawler.max_per_batch * 4
+            )
+            if not pool:
+                log.warning("No candidates found for query. Waiting before retry...")
+                return False
+            ranked_candidates = self.crawler.llm_rank_candidates(
+                pool, top_n=self.crawler.max_per_batch, consider=10
+            )
 
             with vram_stage("crawl", False):
-                log.info("[1/6] Crawling videos via Lustpress...")
-                if ranked_candidates:
-                    log.info("Using %d LLM-ranked candidates", len(ranked_candidates))
-                    videos = self.crawler.download_candidates(ranked_candidates, raw_dir)
-                else:
-                    # Fallback: no LLM ranking performed this batch — use
-                    # the plain crawl() path with soft scoring only.
-                    videos = self.crawler.crawl(batch, raw_dir)
+                log.info("[1/6] Downloading %d LLM-ranked candidates...", len(ranked_candidates))
+                videos = self.crawler.download_candidates(ranked_candidates, raw_dir)
                 if not videos:
                     log.warning("No videos downloaded. Waiting before retry...")
                     return False
@@ -533,10 +538,9 @@ class PipelineOrchestrator:
         # ── 3. Caption (skip if restored from cache) ─────────────
         if not cached:
             with vram_stage("captioning"):
-                log.info("[3/6] Captioning %d clips (loading model → GPU)...", len(scene_videos))
+                log.info("[3/6] Captioning %d clips (captioner already loaded)...", len(scene_videos))
                 dash.section("CAPTIONING")
-                print(f"  Loading model: {self.cfg['captioner'].get('model_id', 'unknown')}")
-                dash.show_vram_status("before caption model load", get_vram_usage())
+                dash.show_vram_status("before captioning", get_vram_usage())
 
                 self.captioner.caption_batch(scene_videos, metadata_file)
 
