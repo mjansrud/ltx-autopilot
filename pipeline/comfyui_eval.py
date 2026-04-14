@@ -9,6 +9,7 @@ and saves the output video to the batch's samples folder.
 import json
 import logging
 import os
+import random
 import shutil
 import time
 import urllib.request
@@ -63,15 +64,40 @@ def ensure_running() -> bool:
 def copy_lora(checkpoint: Path) -> str:
     """Copy trained LoRA to ComfyUI's loras folder. Returns ComfyUI lora name."""
     dst = COMFYUI_LORAS_DIR / LORA_FILENAME
-    shutil.copy2(checkpoint, dst)
+    tmp = dst.with_suffix(".tmp")
+    shutil.copy2(checkpoint, tmp)
+    try:
+        tmp.replace(dst)
+    except PermissionError:
+        # File locked by ComfyUI — use timestamped name instead
+        dst = COMFYUI_LORAS_DIR / f"autopilot_eval_{int(time.time())}.safetensors"
+        tmp.replace(dst)
     log.info("Copied LoRA to %s", dst)
-    import os as _os
-    return f"ltx2{_os.sep}{LORA_FILENAME}"
+    return f"ltx2\\{dst.name}"
+
+
+def clear_cache():
+    """Clear ComfyUI's execution cache so prompts are not skipped."""
+    try:
+        data = json.dumps({"unload_models": False, "free_memory": False}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{COMFYUI_URL}/free", data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass
 
 
 def queue_prompt(prompt: dict) -> str:
     """Queue a workflow prompt. Returns prompt_id."""
-    data = json.dumps({"prompt": prompt}).encode("utf-8")
+    payload = {
+        "prompt": prompt,
+        "extra_data": {
+            "extra_pnginfo": {"workflow": {"nodes": [], "links": [], "extra": {"eval_id": str(uuid.uuid4())}}},
+        },
+    }
+    data = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         f"{COMFYUI_URL}/prompt",
         data=data,
@@ -113,11 +139,15 @@ def build_aio_prompt(
     seed: int = 42,
     output_prefix: str = "autopilot_eval",
     condition_image: str | None = None,
+    use_eros: bool = False,
 ) -> dict | None:
-    """Load the full two-step upscale workflow and modify prompt + LoRA."""
-    wf_path = Path(__file__).parent.parent / "workflow-alt.json"
+    """Load the full two-step upscale workflow and modify prompt + LoRA.
+
+    use_eros: True = Eros checkpoint (all-in-one), False = distilled UNET + separate components.
+    """
+    wf_path = Path(__file__).parent.parent / "workflow.json"
     if not wf_path.exists():
-        log.warning("workflow-alt.json not found — using simple workflow")
+        log.warning("workflow.json not found — using simple workflow")
         return None
 
     wf = json.loads(wf_path.read_text(encoding="utf-8"))
@@ -126,7 +156,35 @@ def build_aio_prompt(
     if "28" in wf:
         wf["28"]["inputs"]["text"] = prompt_text
 
-    # Add our trained LoRA to Power Lora Loader (node 7 — second loader in chain)
+    # Fix model paths to match local ComfyUI installation
+    for nid in ["1", "2", "118"]:
+        if nid in wf and wf[nid]["inputs"].get("ckpt_name") == "ltx2310eros_beta.safetensors":
+            wf[nid]["inputs"]["ckpt_name"] = "ltx\\ltx2310eros_beta.safetensors"
+    if "118" in wf:
+        wf["118"]["inputs"]["text_encoder"] = "gemma-3-12b-abliterated-text-encoder.safetensors"
+    if "186" in wf:
+        wf["186"]["inputs"]["unet_name"] = "ltx2\\ltx-2.3-22b-dev_transformer_only_bf16.safetensors"
+    if "189" in wf:
+        wf["189"]["inputs"]["clip_name1"] = "gemma-3-12b-abliterated-text-encoder.safetensors"
+    if "190" in wf:
+        wf["190"]["inputs"]["ckpt_name"] = "ltx\\ltx2310eros_beta.safetensors"
+
+    # Model switch: Eros (all-in-one checkpoint) vs Distilled (separate components)
+    if use_eros:
+        sel = {"191": 1, "192": 1, "193": 1, "194": 1}
+    else:
+        sel = {"191": 2, "192": 2, "193": 2, "194": 2}
+    for nid, val in sel.items():
+        if nid in wf:
+            wf[nid]["inputs"]["selection_setting"] = val
+
+    # Disable all third-party LoRAs in node 6
+    if "6" in wf:
+        for key in list(wf["6"]["inputs"]):
+            if key.startswith("lora_"):
+                wf["6"]["inputs"][key]["on"] = False
+
+    # Set node 7: distilled LoRA + our trained LoRA only
     if "7" in wf:
         wf["7"]["inputs"]["lora_2"] = {
             "on": True,
@@ -138,7 +196,25 @@ def build_aio_prompt(
     if "8" in wf:
         wf["8"]["inputs"]["chunks"] = 16
 
-    # Update seed
+    # Set clip duration to 10 seconds (10*24+1 = 241 frames)
+    if "18" in wf:
+        wf["18"]["inputs"]["Xi"] = 10
+        wf["18"]["inputs"]["Xf"] = 10
+
+    # Set base resolution for ~720p output (2x upscale: 640x352 → 1280x704)
+    if "19" in wf:
+        wf["19"]["inputs"]["Xi"] = 640
+        wf["19"]["inputs"]["Xf"] = 640
+    if "181" in wf:
+        wf["181"]["inputs"]["Xi"] = 352
+        wf["181"]["inputs"]["Xf"] = 352
+    if "26:39" in wf:
+        wf["26:39"]["inputs"]["width"] = 640
+        wf["26:39"]["inputs"]["height"] = 352
+
+    # Update seed — set directly on RandomNoise node to bust ComfyUI cache
+    if "123" in wf:
+        wf["123"]["inputs"]["noise_seed"] = seed
     if "125" in wf:
         wf["125"]["inputs"]["seed"] = seed
 
@@ -147,12 +223,26 @@ def build_aio_prompt(
         if node_id in wf:
             wf[node_id]["inputs"]["filename_prefix"] = output_prefix
 
-    # Update conditioning image for i2v
-    if condition_image and "15" in wf:
+    # I2V / T2V toggle — bypass image conditioning for T2V
+    if condition_image:
         img_src = Path(condition_image)
         img_dst = COMFYUI_INPUT_DIR / img_src.name
         shutil.copy2(img_src, img_dst)
-        wf["15"]["inputs"]["image"] = img_src.name
+        if "15" in wf:
+            wf["15"]["inputs"]["image"] = img_src.name
+        for nid in ["26:44", "26:87"]:
+            if nid in wf:
+                wf[nid]["inputs"]["bypass"] = False
+    else:
+        # T2V mode — bypass LTXVImgToVideoInplace nodes
+        for nid in ["26:44", "26:87"]:
+            if nid in wf:
+                wf[nid]["inputs"]["bypass"] = True
+        # Still need a valid image for LoadImage node validation
+        if "15" in wf:
+            existing = list(COMFYUI_INPUT_DIR.glob("*.png")) + list(COMFYUI_INPUT_DIR.glob("*.jpg"))
+            if existing:
+                wf["15"]["inputs"]["image"] = existing[0].name
 
     return wf
 
@@ -207,7 +297,7 @@ def build_t2v_prompt(
             "class_type": "LoraLoaderModelOnly",
             "inputs": {
                 "model": ["1", 0],
-                "lora_name": os.sep.join(["ltx2", "ltx-2.3-22b-distilled-lora-dynamic_fro09_avg_rank_105_bf16.safetensors"]),
+                "lora_name": os.sep.join(["ltx2", "ltx-2.3-22b-distilled-1.1_lora-dynamic_fro09_avg_rank_111_bf16.safetensors"]),
                 "strength_model": 0.6,
             }
         },
@@ -338,6 +428,7 @@ def run_eval(
     width: int = 768,
     height: int = 448,
     num_frames: int = 89,
+    use_eros: bool = False,
 ):
     """Run t2v + i2v evaluation via ComfyUI API."""
     if not ensure_running():
@@ -346,16 +437,18 @@ def run_eval(
 
     lora_name = copy_lora(checkpoint)
     output_dir.mkdir(parents=True, exist_ok=True)
+    seed_base = random.randint(0, 2**31)
+    clear_cache()
 
     # T2V
     if prompts:
         for i, prompt in enumerate(prompts):
             log.info("T2V %d: %.80s...", i, prompt)
             prefix = f"step_{step:06d}_t2v_{i}"
-            p = build_aio_prompt(prompt, lora_name, seed=42+i, output_prefix=prefix)
+            p = build_aio_prompt(prompt, lora_name, seed=seed_base+i, output_prefix=prefix, use_eros=use_eros)
             if p is None:
                 p = build_t2v_prompt(prompt, lora_name, width=width, height=height,
-                                    num_frames=num_frames, seed=42+i, output_prefix=prefix)
+                                    num_frames=num_frames, seed=seed_base+i, output_prefix=prefix)
             prompt_id = queue_prompt(p)
             result = wait_for_completion(prompt_id)
             if result:
@@ -370,12 +463,12 @@ def run_eval(
             log.info("I2V %d: %s", i, Path(ref["image"]).name)
             prefix = f"step_{step:06d}_i2v_{i}"
             # Try AIO workflow with conditioning image
-            p = build_aio_prompt(ref["prompt"], lora_name, seed=42+i,
-                                output_prefix=prefix, condition_image=ref["image"])
+            p = build_aio_prompt(ref["prompt"], lora_name, seed=seed_base+i,
+                                output_prefix=prefix, condition_image=ref["image"], use_eros=use_eros)
             if p is None:
                 p = build_i2v_prompt(ref["prompt"], ref["image"], lora_name,
                                     width=width, height=height, num_frames=num_frames,
-                                    seed=42+i, output_prefix=prefix)
+                                    seed=seed_base+i, output_prefix=prefix)
             prompt_id = queue_prompt(p)
             result = wait_for_completion(prompt_id)
             if result:
@@ -385,11 +478,30 @@ def run_eval(
                 log.error("  I2V %d timed out", i)
 
     log.info("ComfyUI eval complete — results in %s", output_dir)
+    _kill_comfyui()
+
+
+def _kill_comfyui():
+    """Kill ComfyUI process to free VRAM for training."""
+    import subprocess
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "ComfyUI.exe"],
+            capture_output=True, timeout=10,
+        )
+        # Also kill any leftover python processes from ComfyUI
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "ComfyUI-python.exe"],
+            capture_output=True, timeout=10,
+        )
+        log.info("ComfyUI killed to free VRAM")
+    except Exception as e:
+        log.debug("Could not kill ComfyUI: %s", e)
 
 
 def _copy_output(prefix: str, output_dir: Path):
-    """Copy generated video from ComfyUI output to our samples dir."""
-    for f in sorted(COMFYUI_OUTPUT_DIR.glob(f"{prefix}*")):
+    """Copy generated audio video from ComfyUI output to our samples dir."""
+    for f in sorted(COMFYUI_OUTPUT_DIR.glob(f"{prefix}*-audio.mp4")):
         dst = output_dir / f.name
         shutil.copy2(f, dst)
         log.info("  Saved: %s (%.1f KB)", dst.name, dst.stat().st_size / 1024)
