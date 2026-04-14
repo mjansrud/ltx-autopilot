@@ -17,6 +17,8 @@ from pathlib import Path
 
 # Force UTF-8 on Windows to avoid cp1252 encoding errors
 os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+# Prevent PyTorch from hogging GPU memory in the orchestrator process (WDDM shares memory across processes)
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:False")
 if sys.stdout.encoding != "utf-8":
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
@@ -47,6 +49,8 @@ def main():
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config YAML")
     parser.add_argument("--max-batches", type=int, default=None, help="Stop after N batches (default: run forever)")
     parser.add_argument("--batch-once", action="store_true", help="Run a single batch then exit")
+    parser.add_argument("--fresh", action="store_true",
+                        help="Wipe the current batch dir on startup — discard cached clips/captions and crawl fresh")
     parser.add_argument("-v", "--verbose", action="store_true", help="Debug logging")
     args = parser.parse_args()
 
@@ -66,7 +70,7 @@ def main():
     pid_file.write_text(str(os.getpid()))
 
     try:
-        orchestrator = PipelineOrchestrator(config_path)
+        orchestrator = PipelineOrchestrator(config_path, start_fresh=args.fresh)
         orchestrator.run(max_batches=max_batches)
     finally:
         pid_file.unlink(missing_ok=True)

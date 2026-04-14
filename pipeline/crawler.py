@@ -155,7 +155,12 @@ class VideoCrawler:
     def __init__(self, config: dict, server: LustpressServer, captioner=None):
         self.server = server
         self._captioner = captioner
-        self.queries = config.get("search_queries", ["amateur"])
+        self.focus = config.get("focus", "").strip()
+        if not self.focus:
+            raise RuntimeError(
+                "crawler.focus is required in config — queries are always LLM-generated, "
+                "no static fallback. Set 'focus' under 'crawler:' in your config/session."
+            )
         self.sources = config.get("sources", ["xvideos", "xnxx", "eporner", "redtube"])
         self.max_per_batch = config.get("max_videos_per_batch", 8)
         self.min_dur = config.get("min_duration_sec", 5)
@@ -168,55 +173,91 @@ class VideoCrawler:
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _generate_query(self, batch_num: int) -> str:
-        """Use an LLM to generate a diverse, creative search query."""
-        import random
+        """Use an LLM to generate a diverse, creative search query based on session focus.
 
-        # Track recently used queries to avoid repetition
+        Always LLM-driven — no static fallback. Raises if the captioner is missing
+        or the LLM output is unusable (fix the root cause rather than silently drifting).
+        """
+        if self._captioner is None:
+            raise RuntimeError(
+                "[QUERY-GEN] No captioner available — queries must be LLM-generated. "
+                "Ensure the captioner is loaded before calling _generate_query."
+            )
+
         history_file = Path(self.archive_path).parent / "query_history.txt"
         recent = []
         if history_file.exists():
-            recent = history_file.read_text().strip().splitlines()[-20:]  # last 20 queries
+            recent = history_file.read_text().strip().splitlines()[-20:]
+        recent_block = "\n".join(f"- {q}" for q in recent) if recent else "(none yet)"
 
-        # Build prompt with user's style preferences from config
-        style_hints = "\n".join(f"- {q}" for q in self.queries[:10])
         prompt = (
             "Generate a single short adult video search query (3-6 words) for finding diverse HD porn content. "
             "The query should work on sites like xvideos/xnxx/redtube. "
             "Include 'hd' at the end. Focus on HIGH QUALITY, well-lit, professional-looking content.\n\n"
-            "PRIMARY FOCUS: busty natural girls with huge breasts. Big natural tits are the main theme.\n\n"
-            "The user's preferred style/themes (for reference, don't copy directly):\n"
-            f"{style_hints}\n\n"
-            "Generate a CREATIVE and SPECIFIC query that features big natural breasts but explores "
-            "NEW variations in: positions (cowgirl, doggystyle, missionary, standing, prone bone, titfuck), "
-            "settings (bedroom, shower, outdoor, office, pool), ethnicities, camera angles (pov, close up), "
-            "and scenarios. Be specific — avoid generic terms.\n\n"
+            f"SESSION FOCUS:\n{self.focus}\n\n"
+            "Generate a CREATIVE and SPECIFIC query that fits the session focus but explores "
+            "NEW variations in positions, settings, ethnicities, camera angles, and scenarios. "
+            "Be specific — avoid generic terms.\n\n"
+            f"Recently used queries (DO NOT repeat these):\n{recent_block}\n\n"
+            "Reply with ONLY the search query, nothing else."
         )
-        if recent:
-            prompt += f"AVOID these recent queries (already used):\n" + "\n".join(f"- {q}" for q in recent[-10:]) + "\n\n"
-        prompt += "Reply with ONLY the search query, nothing else."
 
-        # Use the captioner model if available (already loaded on GPU)
-        if self._captioner is not None:
-            try:
-                result = self._captioner.generate_text(prompt)
-                import re as _re
-                query = result.strip().strip('"').lower().split("\n")[0]
-                query = _re.sub(r'[^a-z0-9 ]', ' ', query).strip()  # only alphanumeric + spaces
-                query = ' '.join(query.split())  # collapse whitespace
-                if 5 < len(query) < 60:
-                    with open(history_file, "a") as f:
-                        f.write(query + "\n")
-                    log.info("[QUERY-GEN] Captioner generated: '%s'", query)
-                    return query
-            except Exception as e:
-                log.debug("[QUERY-GEN] Captioner failed: %s", e)
+        result = self._captioner.generate_text(prompt)
+        import re as _re
+        query = result.strip().strip('"').lower().split("\n")[0]
+        query = _re.sub(r'[^a-z0-9 ]', ' ', query).strip()
+        query = ' '.join(query.split())
+        if not (5 < len(query) < 60):
+            raise RuntimeError(
+                f"[QUERY-GEN] LLM returned unusable query (len={len(query)}): {result!r}"
+            )
 
-        # Fallback: pick from config queries (captioner not available)
-        query = random.choice(self.queries)
-        log.info("[QUERY-GEN] Fallback (no LLM): '%s'", query)
         with open(history_file, "a") as f:
             f.write(query + "\n")
+        log.info("[QUERY-GEN] LLM generated: '%s'", query)
         return query
+
+    def generate_eval_prompts(self, focus: str, count: int) -> list[str]:
+        """Generate N detailed LTX-2 scene prompts for t2v eval from a session focus.
+
+        One LLM call per prompt; each call sees previous outputs so the LLM varies setups.
+        Captioner must already be loaded. Raises on unusable output.
+        """
+        if self._captioner is None:
+            raise RuntimeError("[EVAL-GEN] No captioner available — eval prompts must be LLM-generated.")
+        if not focus or not focus.strip():
+            raise RuntimeError("[EVAL-GEN] Empty focus — cannot generate eval prompts.")
+
+        prompts: list[str] = []
+        for i in range(count):
+            prev_block = "\n".join(f"- {p[:120]}..." for p in prompts) if prompts else "(none yet)"
+            llm_prompt = (
+                "Generate ONE detailed scene description for a text-to-video adult content model (LTX-2). "
+                "The description must be 3-5 sentences covering, in order: "
+                "(1) shot type / camera angle, (2) brief subject appearance, "
+                "(3) detailed action and body movement, (4) lighting and setting, "
+                "(5) sound details. Write it as a single paragraph — no numbering, no labels.\n\n"
+                f"SESSION FOCUS:\n{focus}\n\n"
+                f"Already generated this round (DO NOT repeat these setups):\n{prev_block}\n\n"
+                "Reply with ONLY the scene paragraph, no preamble, no quotes, no labels."
+            )
+            result = self._captioner.generate_text(llm_prompt, max_new_tokens=400).strip()
+            # Strip common wrappers the LLM might add
+            result = result.strip('"').strip("'").strip()
+            # Drop any leading "Scene:" / "Description:" style labels
+            for prefix in ("Scene:", "Description:", "Prompt:", "Paragraph:"):
+                if result.lower().startswith(prefix.lower()):
+                    result = result[len(prefix):].strip()
+            if len(result) < 80:
+                raise RuntimeError(
+                    f"[EVAL-GEN] LLM returned too-short scene ({len(result)} chars) for prompt {i+1}: {result!r}"
+                )
+            if len(result) > 2000:
+                result = result[:2000]
+            prompts.append(result)
+            log.info("[EVAL-GEN] Scene %d/%d ready (%d chars)", i + 1, count, len(result))
+
+        return prompts
 
     def _load_seen(self) -> set[str]:
         """Load seen URLs from archive file."""
@@ -425,9 +466,8 @@ class VideoCrawler:
         Full crawl cycle: search via Lustpress → download with yt-dlp.
         Returns list of downloaded MP4 paths.
         """
-        query_idx = batch_num % len(self.queries)
-        log.info("Crawling batch %d — query: '%s', sources: %s",
-                 batch_num, self.queries[query_idx], self.sources)
+        log.info("Crawling batch %d — sources: %s (query generated by LLM)",
+                 batch_num, self.sources)
 
         candidates = self._collect_video_urls(batch_num)
         if not candidates:

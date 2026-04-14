@@ -392,7 +392,7 @@ class TransformersCaptioner:
 
         return clean_caption(caption)
 
-    def generate_text(self, prompt: str) -> str:
+    def generate_text(self, prompt: str, max_new_tokens: int = 50) -> str:
         """Generate text using the loaded model (must be loaded first). For query generation etc."""
         import torch
         if self.model is None:
@@ -414,7 +414,7 @@ class TransformersCaptioner:
             input_len = inputs["input_ids"].shape[1]
             with torch.inference_mode():
                 out = self.model.generate(**inputs, return_audio=False, do_sample=True,
-                                          temperature=1.0, thinker_max_new_tokens=50)
+                                          temperature=1.0, thinker_max_new_tokens=max_new_tokens)
             return self.processor.batch_decode(out[:, input_len:], skip_special_tokens=True)[0].strip()
         else:
             messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -422,7 +422,7 @@ class TransformersCaptioner:
             inputs = self.processor(text=[text], return_tensors="pt").to(self.model.device)
             input_len = inputs["input_ids"].shape[1]
             with torch.inference_mode():
-                out = self.model.generate(**inputs, max_new_tokens=50, do_sample=True, temperature=1.0)
+                out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True, temperature=1.0)
             return self.processor.batch_decode(out[:, input_len:], skip_special_tokens=True)[0].strip()
 
     def caption_batch(self, video_paths: list[Path], output_file: Path) -> Path:
@@ -444,9 +444,10 @@ class TransformersCaptioner:
             try:
                 caption = self.caption_video(vpath)
 
-                # Filter: model writes "SKIP" for non-sexual clips
+                # Filter: model writes "SKIP" for non-sexual clips — delete the file
                 if caption.strip().upper().startswith("SKIP"):
-                    log.info("  FILTERED (non-sexual): %s", vpath.name)
+                    log.info("  FILTERED (non-sexual): %s — deleting", vpath.name)
+                    vpath.unlink(missing_ok=True)
                     continue
 
                 try:

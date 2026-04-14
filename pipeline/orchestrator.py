@@ -23,17 +23,52 @@ from .crawler import VideoCrawler, LustpressServer
 from .evaluator import Evaluator
 from .preprocessor import Preprocessor, SceneSplitter
 from .state import PipelineState
-from .trainer import Trainer
+from .trainer import Trainer, SlowTrainingError
 from .vram import flush_vram, get_vram_usage, vram_stage
 from . import dashboard as dash
 
 log = logging.getLogger(__name__)
 
 
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Recursively merge override into base. Dicts merge, everything else replaces."""
+    result = dict(base)
+    for k, v in override.items():
+        if k in result and isinstance(result[k], dict) and isinstance(v, dict):
+            result[k] = _deep_merge(result[k], v)
+        else:
+            result[k] = v
+    return result
+
+
+def _load_config(path: Path) -> dict:
+    """Load a YAML config, resolving `extends: <relative-path>` inheritance chains."""
+    path = Path(path).resolve()
+    cfg = yaml.safe_load(path.read_text()) or {}
+    extends = cfg.pop("extends", None)
+    if extends:
+        parent_path = (path.parent / extends).resolve()
+        parent = _load_config(parent_path)
+        cfg = _deep_merge(parent, cfg)
+    return cfg
+
+
 class PipelineOrchestrator:
-    def __init__(self, config_path: str | Path):
+    def __init__(self, config_path: str | Path, start_fresh: bool = False):
         self.config_path = Path(config_path)
-        self.cfg = yaml.safe_load(self.config_path.read_text())
+        self.cfg = _load_config(self.config_path)
+
+        # If set, wipe the upcoming batch dir on the first run_batch() so we
+        # discard cached clips/captions and force a fresh crawl. Only applies once.
+        self._start_fresh_pending = start_fresh
+
+        # Clear any stale pre-generated LLM artifacts from a previous run — they were
+        # made under the previous session's focus and would leak into this one.
+        for stale in (Path("./workspace") / "next_query.txt",
+                      Path("./workspace") / "next_eval_prompts.json"):
+            if stale.exists():
+                log.info("[SESSION] Clearing stale %s from previous run", stale.name)
+                stale.unlink()
 
         self.work_dir = None  # set per-batch in run_batch
         self.state = PipelineState(self.cfg["state_file"])
@@ -128,6 +163,44 @@ class PipelineOrchestrator:
 
         log.info("[PREFETCH] Batch %d ready: %d videos, %d scenes", batch_num, len(videos), len(scene_videos))
         return videos, scene_videos
+
+    # ── LLM-generated eval prompts (piggybacks on already-loaded captioner) ─────
+    def _will_eval_this_batch(self) -> bool:
+        """Predict whether this batch's training will cross an evaluation boundary."""
+        eval_every = self.cfg.get("evaluation", {}).get("every_n_steps", 0)
+        if eval_every <= 0:
+            return False
+        current = self.state.total_steps
+        after = current + self.cfg["training"]["steps_per_batch"]
+        return (after // eval_every) > (current // eval_every)
+
+    def _generate_eval_prompts(self):
+        """Generate eval scene prompts using the already-loaded captioner.
+
+        Caller is responsible for ensuring the captioner is loaded. Writes the
+        prompts to `./workspace/next_eval_prompts.json`, overwriting any prior file.
+        """
+        eval_cfg = self.cfg.get("evaluation", {})
+        count = int(eval_cfg.get("num_prompts", 2))
+        focus = (eval_cfg.get("focus") or self.cfg["crawler"].get("focus", "")).strip()
+        log.info("[EVAL-GEN] Generating %d eval prompts from session focus", count)
+        prompts = self.crawler.generate_eval_prompts(focus, count)
+        out = Path("./workspace") / "next_eval_prompts.json"
+        out.write_text(json.dumps(prompts, indent=2, ensure_ascii=False), encoding="utf-8")
+        log.info("[EVAL-GEN] Wrote %d eval prompts to %s", len(prompts), out)
+
+    def _consume_eval_prompts(self) -> list[str]:
+        """Read and delete the pre-generated eval prompts file. Raises if missing."""
+        f = Path("./workspace") / "next_eval_prompts.json"
+        if not f.exists():
+            raise RuntimeError(
+                "[EVAL-GEN] next_eval_prompts.json missing at eval time — "
+                "prompts are always LLM-generated. Check earlier captioning logs for errors."
+            )
+        prompts = json.loads(f.read_text(encoding="utf-8"))
+        f.unlink()
+        log.info("[EVAL-GEN] Consumed %d pre-generated eval prompts", len(prompts))
+        return prompts
 
     def _start_prefetch(self, batch_num: int):
         """Start prefetching next batch in background thread."""
@@ -318,7 +391,26 @@ class PipelineOrchestrator:
           6. Cleanup             — free disk
         """
         batch = self.state.batch_num
+        step = self.state.total_steps
+        # Update root logger prefix so all sub-component logs include batch/step
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(logging.Formatter(
+                f"%(asctime)s [%(levelname)s] [B{batch}/S{step}] %(name)s: %(message)s",
+                datefmt="%H:%M:%S"))
+
+        # Predict whether this batch's training will trigger an evaluation —
+        # drives LLM eval-prompt generation during the captioner-loaded window.
+        will_eval = self._will_eval_this_batch()
+        eval_prompts_file = Path("./workspace") / "next_eval_prompts.json"
         self.work_dir = Path(f"./workspace/batch-{batch:04d}")
+
+        # One-shot --fresh: wipe any cached clips/captions for this batch before starting
+        if self._start_fresh_pending:
+            if self.work_dir.exists():
+                log.info("[FRESH] Wiping batch dir %s — will crawl fresh", self.work_dir)
+                shutil.rmtree(self.work_dir, ignore_errors=True)
+            self._start_fresh_pending = False
+
         self._ensure_work_dir()
         raw_dir = self.work_dir / "raw"
         scenes_dir = self.work_dir / "scenes"
@@ -327,11 +419,15 @@ class PipelineOrchestrator:
         i2v_refs = None
         checkpoint = None
 
-        # Show batch header
-        query_idx = batch % len(self.cfg["crawler"]["search_queries"])
-        query = self.cfg["crawler"]["search_queries"][query_idx]
+        # Show batch header — use pre-generated LLM query if available, else focus
+        query_file = Path("./workspace") / "next_query.txt"
+        if query_file.exists():
+            display_query = query_file.read_text().strip()
+        else:
+            focus = self.cfg["crawler"].get("focus", "(no focus set)")
+            display_query = f"[LLM will generate for: {focus[:80]}]"
         sources = self.cfg["crawler"].get("sources", ["xvideos", "xnxx"])
-        dash.show_batch_header(batch, self.state.total_steps, query, sources)
+        dash.show_batch_header(batch, self.state.total_steps, display_query, sources)
         dash.show_vram_status("batch start", get_vram_usage())
 
         # ── 1+2. Try history cache → prefetch → fresh download ─────
@@ -350,12 +446,19 @@ class PipelineOrchestrator:
             log.info("[1-2/6] Using prefetched data: %d videos, %d scenes", len(videos), len(scene_videos))
             dash.show_scene_split(len(videos), len(scene_videos), scenes_dir if scenes_dir.exists() else raw_dir)
         else:
-            # Generate search query using captioner if no pre-generated one exists
+            # Generate search query using captioner if no pre-generated one exists.
+            # Piggyback eval-prompt gen on the same load if this batch will evaluate.
             query_file = Path("./workspace") / "next_query.txt"
-            if not query_file.exists():
-                log.info("[QUERY-GEN] Loading captioner to generate search query...")
+            need_query = not query_file.exists()
+            need_eval_prompts = will_eval and not eval_prompts_file.exists()
+            if need_query or need_eval_prompts:
+                log.info("[LLM] Loading captioner for aux gen (query=%s, eval_prompts=%s)",
+                         need_query, need_eval_prompts)
                 self.captioner.load()
-                self.crawler.generate_next_query(batch)
+                if need_query:
+                    self.crawler.generate_next_query(batch)
+                if need_eval_prompts:
+                    self._generate_eval_prompts()
                 self.captioner.unload()
                 flush_vram()
 
@@ -383,6 +486,24 @@ class PipelineOrchestrator:
             scene_videos = sorted(scene_videos[:max_clips])
             log.info("Capped to %d clips (from %d)", max_clips, len(scene_videos))
 
+        # ── Cached-path auxiliary LLM gen ─────────────────────────
+        # In the cached crash-recovery path, captioning is skipped, so the
+        # captioner never loads. If we still need eval prompts (will_eval) or
+        # a query file for the upcoming prefetch, load once here and handle both.
+        if cached:
+            need_query_for_prefetch = not (Path("./workspace") / "next_query.txt").exists()
+            need_eval_prompts = will_eval and not eval_prompts_file.exists()
+            if need_query_for_prefetch or need_eval_prompts:
+                log.info("[LLM] Loading captioner for cached-path aux gen (query=%s, eval_prompts=%s)",
+                         need_query_for_prefetch, need_eval_prompts)
+                self.captioner.load()
+                if need_query_for_prefetch:
+                    self.crawler.generate_next_query(batch + 1)
+                if need_eval_prompts:
+                    self._generate_eval_prompts()
+                self.captioner.unload()
+                flush_vram()
+
         # ── Start prefetch early so scenes are ready by end of captioning ──
         next_batch = self.state.batch_num + 1
         log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
@@ -407,6 +528,10 @@ class PipelineOrchestrator:
                 # Generate search query for next crawl while model is still loaded
                 self.crawler.generate_next_query(batch + 1)
 
+                # Piggyback eval-prompt generation on the same captioner load
+                if will_eval and not eval_prompts_file.exists():
+                    self._generate_eval_prompts()
+
                 # Now unload captioner
                 self.captioner.unload()
                 flush_vram()
@@ -421,7 +546,7 @@ class PipelineOrchestrator:
         # ── 4. Preprocess (runs as subprocess) ─────────────────────
         with vram_stage("preprocessing"):
             log.info("[4/6] Preprocessing (computing latents)...")
-            self.preprocessor.process(metadata_file, precomputed_dir)
+            self.preprocessor.process(metadata_file, precomputed_dir, batch_num=batch)
             dash.show_preprocessing(precomputed_dir)
 
         # ── 5. Train (runs as subprocess, GPU occupied) ────────────
@@ -443,7 +568,12 @@ class PipelineOrchestrator:
             dash.show_training_start(steps, resume_from)
 
             log.info("[5/6] Training for %d steps...", steps)
-            checkpoint = self.trainer.train(precomputed_dir, resume_from, batch_num=batch, i2v_refs=i2v_refs)
+            try:
+                checkpoint = self.trainer.train(precomputed_dir, resume_from, batch_num=batch, i2v_refs=i2v_refs)
+            except SlowTrainingError:
+                log.warning("[5/6] Training too slow — wiping batch %d and retrying with new videos", batch)
+                shutil.rmtree(self.work_dir, ignore_errors=True)
+                return False
 
             new_total = self.state.total_steps + steps
             dash.show_training_complete(checkpoint, new_total)
@@ -477,12 +607,13 @@ class PipelineOrchestrator:
             if ckpt_file:
                 try:
                     from .comfyui_eval import run_eval as comfyui_eval
+                    eval_prompts = self._consume_eval_prompts()
                     if True:  # comfyui_eval handles starting ComfyUI if needed
                         comfyui_eval(
                             checkpoint=ckpt_file,
                             step=new_total,
                             output_dir=self.work_dir / "samples",
-                            prompts=eval_cfg.get("prompts", []),
+                            prompts=eval_prompts,
                             i2v_refs=i2v_refs,
                             width=eval_cfg.get("width", 768),
                             height=eval_cfg.get("height", 448),

@@ -1,0 +1,23 @@
+# ─────────────────────────────────────────────────────────────
+#  Session: close-up penis
+#  Inherits everything from ../config.yaml (same LoRA, same workspace,
+#  same state + download archive — training continues where it left off).
+#  Only the fields below override the parent.
+#
+#  Activate:
+#      python main.py --config sessions/closeup_penis.yaml
+# ─────────────────────────────────────────────────────────────
+
+extends: ../config.yaml
+
+crawler:
+  focus: |
+    Extreme close-ups of erect penises during blowjobs, handjobs, titfucks,
+    and penetration. The penis should be prominent in the frame. Prefer
+    POV angles, tight framing, glossy/wet textures, and HD professional
+    lighting. Explore variations: deepthroat close-ups, handjob close-ups,
+    cumshot close-ups, titjob close-ups, penetration close-ups (cowgirl,
+    doggystyle, missionary from below), different ethnicities and settings.
+
+  # Drop custom_urls for this session — we want fresh LLM queries only
+  custom_urls: []
