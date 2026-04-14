@@ -173,10 +173,11 @@ class VideoCrawler:
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
     def _generate_query(self, batch_num: int) -> str:
-        """Use an LLM to generate a diverse, creative search query based on session focus.
+        """Use an LLM to generate a short search query based on session focus.
 
-        Always LLM-driven — no static fallback. Raises if the captioner is missing
-        or the LLM output is unusable (fix the root cause rather than silently drifting).
+        Omni 7B tends to return keyword lists rather than compact queries, so we
+        truncate aggressively to the first 6 tokens after ASCII cleanup. Retries
+        a couple of times if the LLM returns something unusable.
         """
         if self._captioner is None:
             raise RuntimeError(
@@ -191,71 +192,115 @@ class VideoCrawler:
         recent_block = "\n".join(f"- {q}" for q in recent) if recent else "(none yet)"
 
         prompt = (
-            "Generate a single short adult video search query (3-6 words) for finding diverse HD porn content. "
-            "The query should work on sites like xvideos/xnxx/redtube. "
-            "Include 'hd' at the end. Focus on HIGH QUALITY, well-lit, professional-looking content.\n\n"
+            "Generate a SHORT search query (MAX 6 words) to find HD adult videos on sites like "
+            "xvideos/xnxx/redtube. Output ONLY the query words, no quotes, no sentences, no lists.\n\n"
             f"SESSION FOCUS:\n{self.focus}\n\n"
-            "Generate a CREATIVE and SPECIFIC query that fits the session focus but explores "
-            "NEW variations in positions, settings, ethnicities, camera angles, and scenarios. "
-            "Be specific — avoid generic terms.\n\n"
+            "STRICT RULES:\n"
+            "  - The query MUST include at least one keyword explicitly listed in the SESSION FOCUS "
+            "above (e.g., if the focus says 'cock' or 'blowjob', the query must include one of those).\n"
+            "  - Pick ONE action keyword and ONE angle/style keyword from the focus.\n"
+            "  - End with 'hd'.\n"
+            "  - 4-6 words total. No generic fillers.\n"
+            "  - Be creative — vary the specific action and angle across batches.\n\n"
             f"Recently used queries (DO NOT repeat these):\n{recent_block}\n\n"
-            "Reply with ONLY the search query, nothing else."
+            "Reply with ONLY the 4-6 word query — no preamble, no quotes, no labels."
         )
 
-        result = self._captioner.generate_text(prompt)
         import re as _re
-        query = result.strip().strip('"').lower().split("\n")[0]
-        query = _re.sub(r'[^a-z0-9 ]', ' ', query).strip()
-        query = ' '.join(query.split())
-        if not (5 < len(query) < 60):
-            raise RuntimeError(
-                f"[QUERY-GEN] LLM returned unusable query (len={len(query)}): {result!r}"
-            )
+        last_result = ""
+        for attempt in range(3):
+            result = self._captioner.generate_text(prompt, max_new_tokens=40, temperature=0.7)
+            last_result = result
+            # Normalize: lowercase, first line only, strip quotes, strip non-ascii
+            query = result.strip().strip('"').strip("'").lower().split("\n")[0]
+            query = _re.sub(r'[^a-z0-9 ]', ' ', query)
+            words = [w for w in query.split() if w]
+            # Truncate keyword soup to first 6 words
+            if len(words) > 6:
+                words = words[:6]
+            query = ' '.join(words)
+            if len(words) >= 2 and 5 < len(query) <= 80:
+                with open(history_file, "a") as f:
+                    f.write(query + "\n")
+                log.info("[QUERY-GEN] LLM generated (attempt %d): '%s'", attempt + 1, query)
+                return query
+            log.warning("[QUERY-GEN] Attempt %d returned unusable output (%d words): %r",
+                        attempt + 1, len(words), result[:200])
 
-        with open(history_file, "a") as f:
-            f.write(query + "\n")
-        log.info("[QUERY-GEN] LLM generated: '%s'", query)
-        return query
+        raise RuntimeError(
+            f"[QUERY-GEN] LLM failed after 3 attempts. Last raw output: {last_result!r}"
+        )
 
     def generate_eval_prompts(self, focus: str, count: int) -> list[str]:
         """Generate N detailed LTX-2 scene prompts for t2v eval from a session focus.
 
         One LLM call per prompt; each call sees previous outputs so the LLM varies setups.
-        Captioner must already be loaded. Raises on unusable output.
+        Uses a concrete example to anchor the output format (Omni 7B tends toward keyword
+        lists without one). Retries each slot a couple of times; raises after 3 failures.
+        Captioner must already be loaded.
         """
         if self._captioner is None:
             raise RuntimeError("[EVAL-GEN] No captioner available — eval prompts must be LLM-generated.")
         if not focus or not focus.strip():
             raise RuntimeError("[EVAL-GEN] Empty focus — cannot generate eval prompts.")
 
+        # Generic, focus-neutral example to demonstrate the paragraph format.
+        example = (
+            "A medium shot from behind shows a woman on her knees with her hair pulled back, "
+            "her hands pressing into the mattress as her body moves forward and back in a steady rhythm. "
+            "She arches her shoulders down and lifts her hips slightly, hair swaying with each motion. "
+            "The room is lit by soft warm lamplight from a bedside table, casting gentle shadows across "
+            "the rumpled sheets. Quiet breathing, rhythmic wet sounds, and the faint creak of the bed frame."
+        )
+
         prompts: list[str] = []
         for i in range(count):
             prev_block = "\n".join(f"- {p[:120]}..." for p in prompts) if prompts else "(none yet)"
             llm_prompt = (
-                "Generate ONE detailed scene description for a text-to-video adult content model (LTX-2). "
-                "The description must be 3-5 sentences covering, in order: "
-                "(1) shot type / camera angle, (2) brief subject appearance, "
-                "(3) detailed action and body movement, (4) lighting and setting, "
-                "(5) sound details. Write it as a single paragraph — no numbering, no labels.\n\n"
-                f"SESSION FOCUS:\n{focus}\n\n"
-                f"Already generated this round (DO NOT repeat these setups):\n{prev_block}\n\n"
-                "Reply with ONLY the scene paragraph, no preamble, no quotes, no labels."
+                "Write ONE detailed scene description for a text-to-video adult model (LTX-2). "
+                "Write it as a SINGLE PARAGRAPH of 3-5 full sentences. Do NOT output a keyword list, "
+                "do NOT use bullet points, do NOT use labels like 'Shot:' or 'Scene:'. Each sentence "
+                "must be a complete grammatical sentence ending in a period.\n\n"
+                "The paragraph must cover, in this order, woven into normal prose:\n"
+                "  1. Shot type / camera angle (close-up, POV, medium, wide, from below, etc.)\n"
+                "  2. Brief subject appearance\n"
+                "  3. Detailed action and body movement\n"
+                "  4. Lighting and setting\n"
+                "  5. Sound details (moans, wet sounds, skin slapping, etc.)\n\n"
+                "EXAMPLE (different focus — copy the STYLE, not the content):\n"
+                f"{example}\n\n"
+                f"NOW WRITE ONE NEW SCENE for this focus:\n{focus}\n\n"
+                f"Already generated this eval round (do NOT repeat these setups):\n{prev_block}\n\n"
+                "Output ONLY the new paragraph, no preamble, no quotes, no labels, no numbering."
             )
-            result = self._captioner.generate_text(llm_prompt, max_new_tokens=400).strip()
-            # Strip common wrappers the LLM might add
-            result = result.strip('"').strip("'").strip()
-            # Drop any leading "Scene:" / "Description:" style labels
-            for prefix in ("Scene:", "Description:", "Prompt:", "Paragraph:"):
-                if result.lower().startswith(prefix.lower()):
-                    result = result[len(prefix):].strip()
-            if len(result) < 80:
-                raise RuntimeError(
-                    f"[EVAL-GEN] LLM returned too-short scene ({len(result)} chars) for prompt {i+1}: {result!r}"
+
+            last_result = ""
+            for attempt in range(3):
+                result = self._captioner.generate_text(llm_prompt, max_new_tokens=400, temperature=0.8).strip()
+                last_result = result
+                # Strip wrappers
+                result = result.strip('"').strip("'").strip()
+                for prefix in ("Scene:", "Description:", "Prompt:", "Paragraph:", "Output:", "New scene:"):
+                    if result.lower().startswith(prefix.lower()):
+                        result = result[len(prefix):].strip()
+                # Validate: sentence-like prose, not keyword soup
+                sentence_count = result.count(".") + result.count("!") + result.count("?")
+                word_count = len(result.split())
+                if len(result) >= 150 and sentence_count >= 2 and word_count >= 25:
+                    if len(result) > 2000:
+                        result = result[:2000]
+                    prompts.append(result)
+                    log.info("[EVAL-GEN] Scene %d/%d ready (attempt %d, %d chars, %d sentences)",
+                             i + 1, count, attempt + 1, len(result), sentence_count)
+                    break
+                log.warning(
+                    "[EVAL-GEN] Scene %d attempt %d rejected (len=%d, sentences=%d, words=%d): %r",
+                    i + 1, attempt + 1, len(result), sentence_count, word_count, result[:200],
                 )
-            if len(result) > 2000:
-                result = result[:2000]
-            prompts.append(result)
-            log.info("[EVAL-GEN] Scene %d/%d ready (%d chars)", i + 1, count, len(result))
+            else:
+                raise RuntimeError(
+                    f"[EVAL-GEN] Scene {i+1} failed after 3 attempts. Last raw output: {last_result!r}"
+                )
 
         return prompts
 
@@ -324,10 +369,24 @@ class VideoCrawler:
         else:
             query = self._generate_query(batch_num)
 
-        # Randomize page and sort to get diverse results from millions of videos
-        page = random.randint(1, 100)
-        sort = random.choice(["mr", "mv", "tr", "lg"])  # most recent, most viewed, top rated, longest
+        # Stay near the top of search results so query relevance dominates.
+        # Pages >5 rapidly degrade into long-tail keyword matches on porn sites.
+        page = random.randint(1, 5)
+        # Only use sorts that keep query relevance as a strong signal.
+        # Dropped "tr" (top rated — uncorrelated with query) and "lg" (longest —
+        # surfaces hour-long compilations that happen to contain one tag word).
+        sort = random.choice(["mr", "mv"])  # most recent, most viewed
         log.info("Search params: query='%s', page=%d, sort=%s", query, page, sort)
+
+        # Build a keyword set from the query for soft title scoring.
+        # Stopwords are generic English fillers + camera/shot descriptors (which
+        # appear in titles constantly as "close-up", "pov shot", etc., and would
+        # otherwise create spurious matches unrelated to the actual content).
+        _stop = {"the", "and", "for", "with", "from",
+                 "pov", "close", "shot", "view", "angle", "extreme", "tight"}
+        query_keywords = {w for w in query.lower().split()
+                          if w and w not in _stop and len(w) >= 3}
+        log.info("Query keywords for title scoring: %s", sorted(query_keywords))
 
         # Search across configured sources (shuffled order for variety)
         sources = list(self.sources)
@@ -342,6 +401,7 @@ class VideoCrawler:
                 if not link or link in seen:
                     continue
 
+                title = item.get("title", "") or ""
 
                 # Duration filtering
                 dur = self._parse_duration_seconds(item.get("duration", ""))
@@ -352,16 +412,33 @@ class VideoCrawler:
                 candidates.append({
                     "url": link,
                     "id": vid_id,
-                    "title": item.get("title", "unknown"),
+                    "title": title or "unknown",
                     "source": source,
                     "duration": dur,
                 })
 
-                if len(candidates) >= self.max_per_batch * 2:
+                # Over-collect so scoring has something to rank from.
+                if len(candidates) >= self.max_per_batch * 4:
                     break
 
-            if len(candidates) >= self.max_per_batch * 2:
+            if len(candidates) >= self.max_per_batch * 4:
                 break
+
+        # Soft relevance scoring: rank by title/query keyword overlap.
+        # Never rejects — low-score candidates just sink to the bottom and
+        # only pull through if there's room under max_per_batch.
+        def _score(title: str) -> int:
+            t = title.lower()
+            return sum(1 for kw in query_keywords if kw in t)
+
+        if query_keywords and candidates:
+            scored = [(_score(c["title"]), c) for c in candidates]
+            scored.sort(key=lambda x: x[0], reverse=True)
+            top_score = scored[0][0] if scored else 0
+            zero_score = sum(1 for s, _ in scored if s == 0)
+            log.info("Title scoring: %d candidates, top match=%d kw hits, %d with 0 hits",
+                     len(scored), top_score, zero_score)
+            candidates = [c for _, c in scored]
 
         # Also grab some random videos if configured
         if self.use_random and len(candidates) < self.max_per_batch:

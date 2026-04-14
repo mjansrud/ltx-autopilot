@@ -455,12 +455,14 @@ class PipelineOrchestrator:
                 log.info("[LLM] Loading captioner for aux gen (query=%s, eval_prompts=%s)",
                          need_query, need_eval_prompts)
                 self.captioner.load()
-                if need_query:
-                    self.crawler.generate_next_query(batch)
-                if need_eval_prompts:
-                    self._generate_eval_prompts()
-                self.captioner.unload()
-                flush_vram()
+                try:
+                    if need_query:
+                        self.crawler.generate_next_query(batch)
+                    if need_eval_prompts:
+                        self._generate_eval_prompts()
+                finally:
+                    self.captioner.unload()
+                    flush_vram()
 
             with vram_stage("crawl", False):
                 log.info("[1/6] Crawling videos via Lustpress...")
@@ -497,12 +499,14 @@ class PipelineOrchestrator:
                 log.info("[LLM] Loading captioner for cached-path aux gen (query=%s, eval_prompts=%s)",
                          need_query_for_prefetch, need_eval_prompts)
                 self.captioner.load()
-                if need_query_for_prefetch:
-                    self.crawler.generate_next_query(batch + 1)
-                if need_eval_prompts:
-                    self._generate_eval_prompts()
-                self.captioner.unload()
-                flush_vram()
+                try:
+                    if need_query_for_prefetch:
+                        self.crawler.generate_next_query(batch + 1)
+                    if need_eval_prompts:
+                        self._generate_eval_prompts()
+                finally:
+                    self.captioner.unload()
+                    flush_vram()
 
         # ── Start prefetch early so scenes are ready by end of captioning ──
         next_batch = self.state.batch_num + 1

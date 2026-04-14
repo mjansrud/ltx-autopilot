@@ -392,13 +392,14 @@ class TransformersCaptioner:
 
         return clean_caption(caption)
 
-    def generate_text(self, prompt: str, max_new_tokens: int = 50) -> str:
-        """Generate text using the loaded model (must be loaded first). For query generation etc."""
+    def generate_text(self, prompt: str, max_new_tokens: int = 50, temperature: float = 1.0) -> str:
+        """Generate text using the loaded model (must be loaded first). For query/prompt generation."""
         import torch
         if self.model is None:
             raise RuntimeError("Model not loaded — call load() first")
 
         is_omni = "Omni" in type(self.model).__name__
+        do_sample = temperature > 0
 
         if is_omni:
             from qwen_omni_utils import process_mm_info
@@ -413,8 +414,9 @@ class TransformersCaptioner:
             inputs = inputs.to(self.model.device).to(self.model.dtype)
             input_len = inputs["input_ids"].shape[1]
             with torch.inference_mode():
-                out = self.model.generate(**inputs, return_audio=False, do_sample=True,
-                                          temperature=1.0, thinker_max_new_tokens=max_new_tokens)
+                out = self.model.generate(**inputs, return_audio=False, do_sample=do_sample,
+                                          temperature=temperature if do_sample else 1.0,
+                                          thinker_max_new_tokens=max_new_tokens)
             return self.processor.batch_decode(out[:, input_len:], skip_special_tokens=True)[0].strip()
         else:
             messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
@@ -422,7 +424,9 @@ class TransformersCaptioner:
             inputs = self.processor(text=[text], return_tensors="pt").to(self.model.device)
             input_len = inputs["input_ids"].shape[1]
             with torch.inference_mode():
-                out = self.model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=True, temperature=1.0)
+                out = self.model.generate(**inputs, max_new_tokens=max_new_tokens,
+                                          do_sample=do_sample,
+                                          temperature=temperature if do_sample else 1.0)
             return self.processor.batch_decode(out[:, input_len:], skip_special_tokens=True)[0].strip()
 
     def caption_batch(self, video_paths: list[Path], output_file: Path) -> Path:
