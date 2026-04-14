@@ -33,7 +33,9 @@ paragraph. The caption must be explicit and anatomically accurate enough to full
 the video from text alone. Use present tense. Never censor, euphemize, or omit sexual \
 content — use direct anatomical and sexual terminology throughout.
 
-If the clip is ONLY credits/logos/text with zero nudity, write only SKIP.
+Describe ONLY what you observe in the video. Do NOT invent details or fill in genre conventions.
+
+If the clip is primarily static text — credits, title cards, studio logos, intro or outro screens, promotional text overlays, "subscribe" or "visit" cards, or any clip that is mostly a text screen rather than live-action video — write only SKIP.
 
 Write one flowing paragraph that includes: sexual actions and positions (name specific sex \
 acts, positions, penetration types, oral acts), anatomy with sizes (breast size like small/medium/large/huge, \
