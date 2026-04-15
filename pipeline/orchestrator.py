@@ -850,6 +850,23 @@ class PipelineOrchestrator:
             # Cache to history immediately (before preprocessing which may OOM)
             pass  # data already in batch dir
 
+        # Guard: if the captioner SKIP'd every clip (e.g. a batch of all-anime
+        # or all-text clips slipped past the title blocklist), metadata.jsonl
+        # is empty. Short-circuit: skip preprocess/train and return False so
+        # the retry loop fetches a fresh batch with a new query. Avoids
+        # launching expensive preprocess/train subprocesses on zero data.
+        captioned_count = 0
+        if metadata_file.exists():
+            with open(metadata_file, encoding="utf-8") as f:
+                captioned_count = sum(1 for line in f if line.strip())
+        if captioned_count == 0:
+            log.warning(
+                "[CAPTION] metadata.jsonl has zero entries — all clips were "
+                "SKIP'd by the captioner or captioning failed. Skipping "
+                "preprocess/train and retrying with a fresh query."
+            )
+            return False
+
         # ── 4. Preprocess (runs as subprocess) ─────────────────────
         with vram_stage("preprocessing"):
             log.info("[4/6] Preprocessing (computing latents)...")
