@@ -10,6 +10,7 @@ kept running across batches.
 
 import json
 import logging
+import os
 import shutil
 import subprocess
 import time
@@ -70,6 +71,12 @@ class PipelineOrchestrator:
                 log.info("[SESSION] Clearing stale %s from previous run", stale.name)
                 stale.unlink()
 
+        # Sweep orphaned GPU-holding processes from a previous crashed run. If
+        # training BSOD'd or the user hard-killed the pipeline, ComfyUI (or its
+        # python child) can linger holding ~20GB of VRAM. A fresh captioner load
+        # on top of that causes fragmentation / TDRs / cascading driver crashes.
+        self._sweep_orphan_processes()
+
         self.work_dir = None  # set per-batch in run_batch
         self.state = PipelineState(self.cfg["state_file"])
 
@@ -97,6 +104,80 @@ class PipelineOrchestrator:
 
         self._prefetch_executor = ThreadPoolExecutor(max_workers=1)
         self._prefetch_future: Future | None = None
+
+    def _assert_vram_near_zero(self, label: str, threshold_mb: int = 500):
+        """Warn loudly if main-process VRAM is still high after a cleanup point.
+
+        After captioner.unload() + flush_vram(), the main process's allocated
+        VRAM should be near zero (typical observed: ~9 MB). If it's above the
+        threshold, something leaked — fragmentation or an orphan tensor ref.
+        This is diagnostic only; it does not block the pipeline.
+        """
+        info = get_vram_usage().get(0, {})
+        alloc_mb = info.get("allocated_mb", 0)
+        reserved_mb = info.get("reserved_mb", 0)
+        if alloc_mb > threshold_mb:
+            log.warning("[VRAM-LEAK] %s: %.0f MB allocated / %.0f MB reserved (expected < %d MB)",
+                        label, alloc_mb, reserved_mb, threshold_mb)
+        elif reserved_mb > threshold_mb * 4:
+            log.warning("[VRAM-LEAK] %s: %.0f MB reserved (fragmentation?)", label, reserved_mb)
+
+    def _sweep_orphan_processes(self):
+        """Kill leftover ComfyUI processes from a previous crashed run.
+
+        STRICTLY name-based — only targets the exact ComfyUI image names we
+        spawn ourselves. Never kills by PID, never uses /T (which would kill
+        child trees and can cascade into system processes on Windows). Safe
+        to call before anything is loaded.
+
+        Previous versions queried nvidia-smi for GPU-holding processes and
+        killed arbitrary PIDs — that killed things like dwm.exe and browser
+        GPU helpers and wrecked the desktop. Don't do that.
+        """
+        import subprocess
+        killed = []
+        # ONLY exact names we know we own. No /T flag. No PID-based kill.
+        for image in ("ComfyUI.exe", "ComfyUI-python.exe"):
+            try:
+                r = subprocess.run(
+                    ["taskkill", "/F", "/IM", image],
+                    capture_output=True, text=True, timeout=10,
+                )
+                if r.returncode == 0:
+                    killed.append(image)
+            except Exception as e:
+                log.debug("[SWEEP] taskkill %s failed: %s", image, e)
+
+        # Diagnostic only — log what nvidia-smi sees on GPU 0, but NEVER kill
+        # anything based on this list. Killing arbitrary GPU processes on
+        # Windows can take down the desktop.
+        try:
+            r = subprocess.run(
+                ["nvidia-smi", "--query-compute-apps=pid,process_name,used_memory",
+                 "--format=csv,noheader,nounits"],
+                capture_output=True, text=True, timeout=10,
+            )
+            if r.returncode == 0 and r.stdout.strip():
+                current_pid = os.getpid()
+                for line in r.stdout.strip().splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 3:
+                        pid_s, name, mem = parts[0], parts[1], parts[2]
+                        try:
+                            pid = int(pid_s)
+                        except ValueError:
+                            continue
+                        if pid == current_pid:
+                            continue
+                        log.info("[SWEEP] GPU-holding process present (not killing): "
+                                 "pid=%d name=%s vram=%sMB", pid, name, mem)
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.debug("[SWEEP] nvidia-smi query failed: %s", e)
+
+        if killed:
+            log.info("[SWEEP] Killed orphan ComfyUI processes: %s", ", ".join(killed))
 
     def _ensure_work_dir(self):
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -147,12 +228,18 @@ class PipelineOrchestrator:
         return None
 
     def _prefetch_batch(self, batch_num: int, work_dir: Path) -> tuple[list[Path], list[Path]]:
-        """Download + scene-split for a future batch (CPU only, no GPU)."""
+        """Download + scene-split for a future batch (CPU only, no GPU).
+
+        Runs in a background ThreadPoolExecutor. Never touches the captioner:
+        if `next_query.txt` isn't pre-populated by the main thread, the crawl
+        refuses the query-gen path and returns empty. (Main thread calling
+        into the captioner from a non-main thread races with WDDM.)
+        """
         raw_dir = work_dir / "raw"
         scenes_dir = work_dir / "scenes"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        videos = self.crawler.crawl(batch_num, raw_dir)
+        videos = self.crawler.crawl(batch_num, raw_dir, allow_query_gen=False)
         if not videos:
             return [], []
 
@@ -236,8 +323,14 @@ class PipelineOrchestrator:
 
         dash.show_cleanup(False)
 
-    def _caption_prefetched_batch(self, next_batch_num: int):
-        """Caption the prefetched next batch's scenes while Omni is still loaded."""
+    def _ensure_next_batch_ready(self, next_batch_num: int) -> bool:
+        """Guarantee batch N+1 has scenes on disk.
+
+        Waits for the background prefetch future; if it failed or produced
+        nothing, synchronously crawls + splits now (main thread, captioner
+        still loaded so the crawler's query gen can use it). Returns True if
+        scenes are available after this call.
+        """
         # Wait for prefetch to complete (download + scene split runs in background thread)
         if self._prefetch_future is not None:
             log.info("[PREFETCH-CAPTION] Waiting for prefetch to complete...")
@@ -249,11 +342,57 @@ class PipelineOrchestrator:
 
         next_batch_dir = Path(f"./workspace/batch-{next_batch_num:04d}")
         next_scenes = next_batch_dir / "scenes"
+        next_raw = next_batch_dir / "raw"
+
+        existing_scenes = sorted(next_scenes.glob("*.mp4")) if next_scenes.exists() else []
+        if existing_scenes:
+            return True
+
+        # Prefetch thread produced nothing (common when the prefetch-time
+        # captioner race condition makes query gen fail). Do a synchronous
+        # crawl + split right here — we're inside the captioning block, so
+        # the captioner is loaded and the crawler's query gen will succeed.
+        log.info("[PREFETCH-SYNC] Prefetch gave no scenes for batch %d — crawling synchronously",
+                 next_batch_num)
+        next_raw.mkdir(parents=True, exist_ok=True)
+        try:
+            videos = self.crawler.crawl(next_batch_num, next_raw)
+        except Exception as e:
+            log.warning("[PREFETCH-SYNC] Crawl failed for batch %d: %s", next_batch_num, e)
+            return False
+        if not videos:
+            log.warning("[PREFETCH-SYNC] No videos downloaded for batch %d", next_batch_num)
+            return False
+
+        try:
+            split_dir = self.scene_splitter.split(next_raw, next_scenes)
+        except Exception as e:
+            log.warning("[PREFETCH-SYNC] Scene split failed for batch %d: %s", next_batch_num, e)
+            return False
+
+        scene_clips = sorted(split_dir.glob("*.mp4")) if split_dir.exists() else []
+        if not scene_clips:
+            log.warning("[PREFETCH-SYNC] No scenes extracted for batch %d", next_batch_num)
+            return False
+
+        log.info("[PREFETCH-SYNC] Prepared %d scenes for batch %d", len(scene_clips), next_batch_num)
+        return True
+
+    def _caption_prefetched_batch(self, next_batch_num: int):
+        """Caption the prefetched next batch's scenes while Omni is still loaded.
+
+        Ensures batch N+1 scenes exist first (synchronous crawl fallback if the
+        background prefetch didn't deliver), then captions whichever clips end
+        up on disk. i2v ref generation depends on the resulting metadata.
+        """
+        if not self._ensure_next_batch_ready(next_batch_num):
+            log.info("[PREFETCH-CAPTION] No scenes available for batch %d", next_batch_num)
+            return
+
+        next_batch_dir = Path(f"./workspace/batch-{next_batch_num:04d}")
+        next_scenes = next_batch_dir / "scenes"
         next_meta = next_batch_dir / "metadata.jsonl"
 
-        if not next_scenes.exists():
-            log.info("[PREFETCH-CAPTION] No prefetched scenes for batch %d", next_batch_num)
-            return
         if next_meta.exists() and next_meta.stat().st_size > 0:
             log.info("[PREFETCH-CAPTION] Batch %d already captioned", next_batch_num)
             return
@@ -291,51 +430,103 @@ class PipelineOrchestrator:
         Saves images + metadata.jsonl directly to batch_dir/i2v/.
         Only clips that passed Omni's SKIP filter (have captions) are eligible.
         Extracts a mid-clip frame to avoid title cards / ad screens at start/end.
+
+        Falls back to the most recent previous batch's i2v refs if the next
+        batch isn't ready (prefetch failed, first batch, etc.) — avoids
+        eval batches where i2v is silently skipped.
         """
         import cv2, random
 
+        i2v_dir = self.work_dir / "i2v"
+        meta_lines: list[str] = []
+
         next_batch_dir = Path(f"./workspace/batch-{batch_num + 1:04d}")
         metadata = next_batch_dir / "metadata.jsonl"
-        if not metadata.exists() or metadata.stat().st_size == 0:
-            log.info("[I2V] No captions yet, skipping")
-            return
 
-        entries = []
-        for line in metadata.read_text(encoding="utf-8").splitlines():
-            if line.strip():
-                entries.append(json.loads(line))
+        if metadata.exists() and metadata.stat().st_size > 0:
+            entries = []
+            for line in metadata.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    entries.append(json.loads(line))
 
-        if len(entries) < 2:
-            log.info("[I2V] Not enough clips for i2v (%d)", len(entries))
-            return
+            if len(entries) >= 2:
+                # Shuffle and pick 2 — all entries already passed Omni SKIP filter
+                random.shuffle(entries)
+                i2v_dir.mkdir(parents=True, exist_ok=True)
 
-        # Shuffle and pick 2 — all entries already passed Omni SKIP filter
-        random.shuffle(entries)
-        i2v_dir = self.work_dir / "i2v"
-        i2v_dir.mkdir(parents=True, exist_ok=True)
-        meta_lines = []
+                for entry in entries:
+                    if len(meta_lines) >= 2:
+                        break
+                    clip_path = Path(entry["media_path"])
+                    if not clip_path.is_absolute():
+                        clip_path = next_batch_dir / clip_path
 
-        for entry in entries:
-            if len(meta_lines) >= 2:
-                break
-            clip_path = Path(entry["media_path"])
-            if not clip_path.is_absolute():
-                clip_path = next_batch_dir / clip_path
+                    frame = self._extract_mid_frame(clip_path)
+                    if frame is None:
+                        log.debug("[I2V] No valid frame from %s", clip_path.name)
+                        continue
 
-            frame = self._extract_mid_frame(clip_path)
-            if frame is None:
-                log.debug("[I2V] No valid frame from %s", clip_path.name)
-                continue
+                    img_path = i2v_dir / f"{clip_path.stem}.png"
+                    cv2.imwrite(str(img_path), frame)
+                    meta_lines.append(json.dumps(
+                        {"image": str(img_path.resolve()), "prompt": entry["caption"]},
+                        ensure_ascii=False,
+                    ))
+                    log.info("[I2V] Ref: %s (%d chars)", clip_path.name, len(entry["caption"]))
+            else:
+                log.info("[I2V] Not enough captioned clips in batch %d (%d)",
+                         batch_num + 1, len(entries))
+        else:
+            log.info("[I2V] No captions yet for batch %d — will try fallback", batch_num + 1)
 
-            img_path = i2v_dir / f"{clip_path.stem}.png"
-            cv2.imwrite(str(img_path), frame)
-            meta_lines.append(json.dumps({"image": str(img_path.resolve()), "prompt": entry["caption"]}, ensure_ascii=False))
-            log.info("[I2V] Ref: %s (%d chars)", clip_path.name, len(entry["caption"]))
+        # Fallback: reuse the most recent previous batch's i2v refs.
+        if not meta_lines:
+            prev_refs = self._find_latest_i2v_refs()
+            if prev_refs is not None:
+                src_dir, src_lines = prev_refs
+                i2v_dir.mkdir(parents=True, exist_ok=True)
+                for line in src_lines:
+                    entry = json.loads(line)
+                    src_img = Path(entry["image"])
+                    if not src_img.exists():
+                        log.debug("[I2V] Fallback image missing: %s", src_img)
+                        continue
+                    dst_img = i2v_dir / src_img.name
+                    if not dst_img.exists():
+                        shutil.copy2(src_img, dst_img)
+                    entry["image"] = str(dst_img.resolve())
+                    meta_lines.append(json.dumps(entry, ensure_ascii=False))
+                if meta_lines:
+                    log.info("[I2V] Reused %d refs from %s as fallback",
+                             len(meta_lines), src_dir.name)
+            else:
+                log.info("[I2V] No previous i2v refs found — eval will skip i2v")
 
         if meta_lines:
             meta_file = i2v_dir / "metadata.jsonl"
             meta_file.write_text("\n".join(meta_lines) + "\n", encoding="utf-8")
             log.info("[I2V] Saved %d refs to %s", len(meta_lines), i2v_dir)
+
+    def _find_latest_i2v_refs(self) -> tuple[Path, list[str]] | None:
+        """Scan workspace for the most recent batch dir with a valid i2v/metadata.jsonl.
+
+        Returns (batch_dir, non-empty metadata lines) or None if nothing found.
+        Skips the current batch's own dir.
+        """
+        workspace = Path("./workspace")
+        if not workspace.exists():
+            return None
+        batch_dirs = sorted(workspace.glob("batch-*"), reverse=True)
+        for bd in batch_dirs:
+            if self.work_dir is not None and bd.resolve() == self.work_dir.resolve():
+                continue
+            meta = bd / "i2v" / "metadata.jsonl"
+            if not meta.exists() or meta.stat().st_size == 0:
+                continue
+            lines = [ln for ln in meta.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            if lines:
+                return bd, lines
+        return None
 
     def _save_batch_data(self, batch_num: int):
         """Save scenes + captions into batch dir for recovery + archival."""
@@ -530,6 +721,18 @@ class PipelineOrchestrator:
                     self.captioner.unload()
                     flush_vram()
 
+        # ── Pre-populate next_query.txt for the upcoming prefetch ─────
+        # The prefetch thread runs with allow_query_gen=False (it can't touch
+        # the main-thread captioner context without racing WDDM). So we must
+        # write the query here, while we're still on the main thread with the
+        # captioner loaded (fresh-download path). Cached path already handled
+        # this above. If the captioner isn't loaded (prefetched-path batches),
+        # we skip — prefetch-for-next-batch will then bail cleanly and the
+        # next batch falls through to its own fresh-download.
+        next_query_file = Path("./workspace") / "next_query.txt"
+        if not next_query_file.exists() and self.captioner.is_loaded():
+            self.crawler.generate_next_query(self.state.batch_num + 1)
+
         # ── Start prefetch early so scenes are ready by end of captioning ──
         next_batch = self.state.batch_num + 1
         log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
@@ -561,6 +764,7 @@ class PipelineOrchestrator:
                 self.captioner.unload()
                 flush_vram()
                 dash.show_vram_status("after caption model unload", get_vram_usage())
+                self._assert_vram_near_zero("after captioner unload")
 
                 # Show the generated captions
                 dash.show_captions(metadata_file)
@@ -648,6 +852,11 @@ class PipelineOrchestrator:
                         log.warning("ComfyUI not running — skipping eval")
                 except Exception as e:
                     log.error("Eval failed: %s", e)
+
+            # ComfyUI should be killed by now — verify VRAM is actually free
+            # before the next batch starts loading the captioner on top.
+            flush_vram()
+            self._assert_vram_near_zero("after eval + ComfyUI kill", threshold_mb=1000)
 
         else:
             log.info("[6/6] Skipping evaluation this batch (next at step %d)",
@@ -770,5 +979,20 @@ class PipelineOrchestrator:
         finally:
             # Stop Lustpress server on exit
             self.lustpress.stop()
+            # Shut down the prefetch thread pool so Ctrl+C doesn't hang on a
+            # blocking yt-dlp or crawl call in the background worker.
+            try:
+                self._prefetch_executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                pass
+            # Final safety unload — if anything left the captioner loaded
+            # (exception paths), free VRAM so the next launch starts clean.
+            try:
+                if self.captioner.is_loaded():
+                    log.info("[SHUTDOWN] Unloading captioner on exit")
+                    self.captioner.unload()
+                    flush_vram()
+            except Exception:
+                pass
 
         print(f"\nPipeline finished. {self.state.batch_num} batches, {self.state.total_steps} total steps.")

@@ -89,6 +89,22 @@ def clear_cache():
         pass
 
 
+def unload_comfyui_models():
+    """Tell ComfyUI to unload models and free VRAM (doesn't kill the process)."""
+    try:
+        data = json.dumps({"unload_models": True, "free_memory": True}).encode("utf-8")
+        req = urllib.request.Request(
+            f"{COMFYUI_URL}/free", data=data,
+            headers={"Content-Type": "application/json"}, method="POST",
+        )
+        urllib.request.urlopen(req, timeout=10)
+        log.info("ComfyUI /free called (unload_models=True, free_memory=True)")
+        return True
+    except Exception as e:
+        log.debug("ComfyUI /free call failed: %s", e)
+        return False
+
+
 def queue_prompt(prompt: dict) -> str:
     """Queue a workflow prompt. Returns prompt_id."""
     payload = {
@@ -482,14 +498,27 @@ def run_eval(
 
 
 def _kill_comfyui():
-    """Kill ComfyUI process to free VRAM for training."""
+    """Gracefully unload ComfyUI's models, then hard-kill the process.
+
+    Calls /free first so models get dropped from VRAM while the process is
+    still alive (CUDA context tear-down is cleaner this way than a cold kill).
+    Then sleeps briefly and taskkills as a fallback guarantee.
+    """
     import subprocess
+    import time as _t
+
+    # Step 1: ask ComfyUI to drop models and free VRAM gracefully.
+    unload_comfyui_models()
+    _t.sleep(2)  # give it a beat to actually release
+
+    # Step 2: hard kill by exact image names. No /T flag — on Windows that
+    # can cascade child kills up into unrelated processes and wreck the
+    # desktop. Both image names are killed directly by name match.
     try:
         subprocess.run(
             ["taskkill", "/F", "/IM", "ComfyUI.exe"],
             capture_output=True, timeout=10,
         )
-        # Also kill any leftover python processes from ComfyUI
         subprocess.run(
             ["taskkill", "/F", "/IM", "ComfyUI-python.exe"],
             capture_output=True, timeout=10,
