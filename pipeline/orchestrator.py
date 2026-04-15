@@ -968,7 +968,11 @@ class PipelineOrchestrator:
 
         batches_run = 0
         consecutive_failures = 0
-        max_failures = 5
+        # Retry backoff is capped so transient problems don't make us wait
+        # forever, but there's no hard failure count — the pipeline keeps
+        # trying until the user stops it (Ctrl+C), max_batches is reached,
+        # or max_total_steps is hit.
+        max_backoff = 300  # 5 min between retries at the cap
 
         try:
             max_total_steps = self.cfg.get("training", {}).get("max_total_steps")
@@ -986,13 +990,10 @@ class PipelineOrchestrator:
                         consecutive_failures = 0
                     else:
                         consecutive_failures += 1
-                        wait = min(60 * consecutive_failures, 300)
-                        log.info("Waiting %ds before next attempt...", wait)
+                        wait = min(60 * consecutive_failures, max_backoff)
+                        log.warning("[RETRY] Batch failed (%d consecutive). Waiting %ds, then trying again...",
+                                    consecutive_failures, wait)
                         time.sleep(wait)
-
-                    if consecutive_failures >= max_failures:
-                        log.error("Too many consecutive failures (%d), stopping", max_failures)
-                        break
 
                 except KeyboardInterrupt:
                     raise
@@ -1002,12 +1003,9 @@ class PipelineOrchestrator:
                     self._cleanup()
                     flush_vram()
 
-                    if consecutive_failures >= max_failures:
-                        log.error("Too many consecutive failures, stopping")
-                        break
-
-                    wait = min(30 * consecutive_failures, 120)
-                    log.info("Retrying in %ds...", wait)
+                    wait = min(30 * consecutive_failures, max_backoff)
+                    log.warning("[RETRY] Exception (%d consecutive). Retrying in %ds...",
+                                consecutive_failures, wait)
                     time.sleep(wait)
 
         except KeyboardInterrupt:
