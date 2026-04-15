@@ -120,6 +120,79 @@ class Preprocessor:
         return output_dir
 
 
+def _split_video_worker(video_path_str: str, output_dir_str: str, cfg: dict) -> str:
+    """Module-level worker for ProcessPoolExecutor-based scene splitting.
+
+    Detects scenes with PySceneDetect, filters by duration, picks evenly
+    spaced middle scenes, and cuts each selected scene with ffmpeg stream
+    copy (capped at train_clip_max_seconds). Returns a summary string.
+
+    This lives at module scope so it pickles cleanly across process
+    boundaries — bound methods of SceneSplitter would also pickle, but
+    pulling the logic out here avoids accidentally shipping unpicklable
+    instance state (loggers, open file handles, etc.).
+    """
+    from scenedetect import open_video, SceneManager, ContentDetector, AdaptiveDetector
+    from pathlib import Path as _P
+    import subprocess as _sp
+
+    video = _P(video_path_str)
+    output_dir = _P(output_dir_str)
+    detector = cfg["detector"]
+    max_scenes = cfg["max_scenes"]
+    min_dur = cfg["min_dur"]
+    max_dur = cfg["max_dur"]
+    train_clip_max = cfg["train_clip_max_seconds"]
+
+    # 1. Detect scene boundaries
+    sv = open_video(str(video))
+    sm = SceneManager()
+    if detector == "adaptive":
+        sm.add_detector(AdaptiveDetector())
+    else:
+        sm.add_detector(ContentDetector())
+    sm.detect_scenes(sv)
+    all_scenes = sm.get_scene_list()
+
+    # 2. Filter by duration
+    scenes = [(s, e) for s, e in all_scenes
+              if min_dur <= (e - s).get_seconds() <= max_dur]
+    if not scenes:
+        return f"{video.name}: {len(all_scenes)} scenes detected, 0 usable"
+
+    # 3. Pick N evenly distributed middle scenes
+    if max_scenes and len(scenes) > max_scenes:
+        middle = scenes[1:-1] if len(scenes) > 2 else scenes
+        if len(middle) >= max_scenes:
+            n = len(middle)
+            indices = [int(i * (n - 1) / (max_scenes - 1)) for i in range(max_scenes)]
+            scenes = [middle[i] for i in indices]
+        else:
+            scenes = middle[:max_scenes]
+
+    # 4. Cut selected scenes with ffmpeg stream copy, capped at train clip max
+    stem = video.stem
+    cut_count = 0
+    for i, (start, end) in enumerate(scenes):
+        out_path = output_dir / f"{stem}-Scene-{i+1:03d}.mp4"
+        ss = start.get_seconds()
+        dur = min((end - start).get_seconds(), train_clip_max)
+        cmd = [
+            "ffmpeg", "-y", "-ss", f"{ss:.3f}", "-i", str(video),
+            "-t", f"{dur:.3f}",
+            "-c:v", "copy",
+            "-c:a", "aac", "-b:a", "128k",
+            "-avoid_negative_ts", "1",
+            str(out_path),
+        ]
+        result = _sp.run(cmd, capture_output=True, text=True, errors="replace")
+        if result.returncode == 0:
+            cut_count += 1
+
+    return (f"{video.name}: {len(all_scenes)} detected, {len(scenes)} kept, "
+            f"{cut_count} cut (capped at {train_clip_max:.1f}s)")
+
+
 def _derive_max_clip_seconds(preprocessing_config: dict) -> float:
     """Compute how many seconds the trainer will actually consume from each scene.
 
@@ -168,22 +241,47 @@ class SceneSplitter:
         return float(s)
 
     def split(self, input_dir: Path, output_dir: Path) -> Path:
-        """Split videos into scenes. Returns directory of split clips."""
+        """Split videos into scenes. Returns directory of split clips.
+
+        Uses ProcessPoolExecutor so PySceneDetect runs on multiple CPU cores
+        in parallel (true parallelism, no GIL contention).
+        """
         if not self.enabled:
             log.info("Scene splitting disabled, using raw videos")
             return input_dir
 
-        from concurrent.futures import ThreadPoolExecutor
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+        import os as _os
 
         output_dir.mkdir(parents=True, exist_ok=True)
         videos = sorted(input_dir.glob("*.mp4"))
+        if not videos:
+            return output_dir
         min_dur = self._parse_min_duration()
 
-        with ThreadPoolExecutor(max_workers=len(videos) or 1) as pool:
-            futures = {pool.submit(self._split_video, v, output_dir, min_dur): v for v in videos}
-            for future in futures:
+        # Pack scene-split config into a dict so workers don't need the
+        # SceneSplitter instance (which has a logger ref that doesn't pickle).
+        worker_cfg = {
+            "detector": self.detector,
+            "max_scenes": self.max_scenes,
+            "min_dur": min_dur,
+            "max_dur": self.max_duration,
+            "train_clip_max_seconds": self.train_clip_max_seconds,
+        }
+
+        max_workers = min(len(videos), _os.cpu_count() or 4)
+        log.info("Splitting %d videos on %d CPU workers", len(videos), max_workers)
+
+        with ProcessPoolExecutor(max_workers=max_workers) as pool:
+            futures = {
+                pool.submit(_split_video_worker, str(v), str(output_dir), worker_cfg): v
+                for v in videos
+            }
+            for future in as_completed(futures):
                 try:
-                    future.result()
+                    result = future.result()
+                    if result:
+                        log.info("  %s", result)
                 except Exception as e:
                     log.warning("  Scene split failed for %s: %s", futures[future].name, e)
 
@@ -196,7 +294,11 @@ class SceneSplitter:
         return output_dir
 
     def _split_video(self, video: Path, output_dir: Path, min_dur: float):
-        """Detect scenes, pick evenly spaced ones, cut only those with ffmpeg."""
+        """Detect scenes, pick evenly spaced ones, cut only those with ffmpeg.
+
+        Kept as an instance method for backwards compat / direct calls.
+        Parallel splitting goes through _split_video_worker at module level.
+        """
         from scenedetect import open_video, SceneManager, ContentDetector, AdaptiveDetector
 
         log.info("Splitting scenes: %s", video.name)

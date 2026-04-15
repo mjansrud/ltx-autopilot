@@ -544,13 +544,29 @@ class VideoCrawler:
         sort = random.choice(["mr", "mv"])  # most recent, most viewed
         log.info("Search params: query='%s', page=%d, sort=%s", query, page, sort)
 
-        # Search across configured sources (shuffled order for variety).
-        # Ranking happens in llm_rank_candidates() in the caller — this method
-        # only collects and returns the raw (search-order) candidate pool.
+        # Search across configured sources in parallel (I/O bound HTTP calls —
+        # threads give ~N× speedup over the sequential loop). Ranking happens
+        # in llm_rank_candidates() in the caller; this method only collects
+        # the raw candidate pool.
         sources = list(self.sources)
         random.shuffle(sources)
-        for source in sources:
-            results = self.server.search(source, query, page=page, sort=sort)
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _search_one(src: str) -> tuple[str, list]:
+            try:
+                return src, self.server.search(src, query, page=page, sort=sort)
+            except Exception as e:
+                log.warning("  %s search failed: %s", src, e)
+                return src, []
+
+        with ThreadPoolExecutor(max_workers=len(sources) or 1) as pool:
+            source_results = list(pool.map(_search_one, sources))
+
+        for source, results in source_results:
+            if len(candidates) >= self.max_per_batch * 4:
+                break
+            log.info("  %s search '%s': %d results", source, query, len(results))
 
             for item in results:
                 link = item.get("link", "")
