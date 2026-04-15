@@ -671,15 +671,43 @@ class PipelineOrchestrator:
                 self._generate_eval_prompts()
 
             # Search + LLM-rank candidates while the captioner is loaded.
-            pool = self.crawler.search_candidates(
-                batch, limit=self.crawler.max_per_batch * 4
-            )
-            if not pool:
-                log.warning("No candidates found for query. Waiting before retry...")
+            # Loop: if the LLM finds fewer than top_n good matches in the pool,
+            # generate a fresh query and search again. Up to 3 attempts total
+            # so one off-focus query draw doesn't waste the batch.
+            need_good = self.crawler.max_per_batch
+            ranked_candidates: list[dict] = []
+            best_good = -1
+            for search_attempt in range(3):
+                # After the first attempt, regenerate the query so we're
+                # searching a different slice of the content space.
+                if search_attempt > 0:
+                    log.info("[SEARCH] Retrying with a fresh query (attempt %d/3)", search_attempt + 1)
+                    self.crawler.generate_next_query(batch)
+
+                pool = self.crawler.search_candidates(
+                    batch, limit=self.crawler.max_per_batch * 4
+                )
+                if not pool:
+                    log.warning("[SEARCH] No candidates for attempt %d", search_attempt + 1)
+                    continue
+
+                ranked, good_count = self.crawler.llm_rank_candidates(
+                    pool, top_n=self.crawler.max_per_batch, consider=10
+                )
+                # Keep the best attempt (most good matches) across iterations.
+                if good_count > best_good:
+                    ranked_candidates = ranked
+                    best_good = good_count
+                if good_count >= need_good:
+                    log.info("[SEARCH] Attempt %d: %d/%d good matches — accepting",
+                             search_attempt + 1, good_count, need_good)
+                    break
+                log.info("[SEARCH] Attempt %d: only %d/%d good matches — retrying",
+                         search_attempt + 1, good_count, need_good)
+
+            if not ranked_candidates:
+                log.warning("No candidates after 3 search attempts. Waiting before retry...")
                 return False
-            ranked_candidates = self.crawler.llm_rank_candidates(
-                pool, top_n=self.crawler.max_per_batch, consider=10
-            )
 
             with vram_stage("crawl", False):
                 log.info("[1/6] Downloading %d LLM-ranked candidates...", len(ranked_candidates))

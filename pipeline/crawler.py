@@ -169,6 +169,11 @@ class VideoCrawler:
         self.archive_path = config.get("download_archive", "./state/seen_videos.txt")
         self.use_random = config.get("include_random", True)
         self.custom_urls = config.get("custom_urls", [])
+        # Substrings (case-insensitive) that cause a title to be rejected at
+        # crawl time. Use this to block overrepresented uploaders / studios.
+        self.title_blocklist = [
+            s.lower() for s in config.get("title_blocklist", []) if s
+        ]
         self._config = config  # keep ref for removing consumed URLs
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -186,46 +191,50 @@ class VideoCrawler:
             )
 
         history_file = Path(self.archive_path).parent / "query_history.txt"
-        recent = []
+        recent: list[str] = []
         if history_file.exists():
-            recent = history_file.read_text().strip().splitlines()[-20:]
-        recent_block = "\n".join(f"- {q}" for q in recent) if recent else "(none yet)"
+            recent = [ln for ln in history_file.read_text().splitlines() if ln.strip()][-20:]
 
         prompt = (
-            "Generate a SHORT search query (MAX 6 words) to find HD adult videos on sites like "
-            "xvideos/xnxx/redtube. Output ONLY the query words, no quotes, no sentences, no lists.\n\n"
-            f"SESSION FOCUS:\n{self.focus}\n\n"
-            "STRICT RULES:\n"
-            "  - The query MUST include at least one keyword explicitly listed in the SESSION FOCUS "
-            "above (e.g., if the focus says 'cock' or 'blowjob', the query must include one of those).\n"
-            "  - Pick ONE action keyword and ONE angle/style keyword from the focus.\n"
-            "  - End with 'hd'.\n"
-            "  - 4-6 words total. No generic fillers.\n"
-            "  - Be creative — vary the specific action and angle across batches.\n\n"
-            f"Recently used queries (DO NOT repeat these):\n{recent_block}\n\n"
-            "Reply with ONLY the 4-6 word query — no preamble, no quotes, no labels."
+            "Write a brief adult video search phrase — the kind a real person quickly "
+            "types into the search bar on xvideos/xnxx/redtube. Think Google search, "
+            "not a description: a short natural phrase of a few words. "
+            "Fit the FOCUS.\n\n"
+            f"FOCUS:\n{self.focus}\n\n"
+            "Reply with only the search phrase."
         )
 
         import re as _re
         last_result = ""
-        for attempt in range(3):
-            result = self._captioner.generate_text(prompt, max_new_tokens=40, temperature=0.7)
+        for attempt in range(4):
+            # Higher temperature each retry to break out of repetition loops.
+            temp = 0.7 + 0.15 * attempt
+            # max_new_tokens=30 hard-caps the length so the LLM can't ramble
+            # into a descriptive paragraph. 30 tokens ≈ 20-25 words worst case.
+            result = self._captioner.generate_text(prompt, max_new_tokens=30, temperature=temp)
             last_result = result
-            # Normalize: lowercase, first line only, strip quotes, strip non-ascii
+            log.info("[QUERY-GEN] Attempt %d (temp=%.2f) raw LLM output: %r",
+                     attempt + 1, temp, result[:200])
+
+            # Minimal cleanup: lowercase, first line, strip quotes, drop non-ascii
             query = result.strip().strip('"').strip("'").lower().split("\n")[0]
             query = _re.sub(r'[^a-z0-9 ]', ' ', query)
-            words = [w for w in query.split() if w]
-            # Truncate keyword soup to first 6 words
-            if len(words) > 6:
-                words = words[:6]
-            query = ' '.join(words)
-            if len(words) >= 2 and 5 < len(query) <= 80:
-                with open(history_file, "a") as f:
-                    f.write(query + "\n")
-                log.info("[QUERY-GEN] LLM generated (attempt %d): '%s'", attempt + 1, query)
-                return query
-            log.warning("[QUERY-GEN] Attempt %d returned unusable output (%d words): %r",
-                        attempt + 1, len(words), result[:200])
+            query = ' '.join(query.split())  # collapse whitespace
+
+            if len(query.split()) < 2 or not (5 < len(query) <= 200):
+                log.warning("[QUERY-GEN] Attempt %d unusable after cleanup: %r", attempt + 1, query)
+                continue
+
+            # The only validation: not an exact duplicate of a recent query.
+            # Everything else is trusted to the LLM.
+            if query in recent:
+                log.warning("[QUERY-GEN] Attempt %d exact duplicate of recent query — retrying")
+                continue
+
+            with open(history_file, "a") as f:
+                f.write(query + "\n")
+            log.info("[QUERY-GEN] Final query: %r", query)
+            return query
 
         raise RuntimeError(
             f"[QUERY-GEN] LLM failed after 3 attempts. Last raw output: {last_result!r}"
@@ -316,12 +325,16 @@ class VideoCrawler:
             f.write(url + "\n")
 
     def generate_next_query(self, next_batch_num: int):
-        """Pre-generate a search query for the next batch (call while captioner is loaded)."""
+        """Generate a search query via the LLM and stash it for the upcoming crawl.
+
+        Called from the main thread while the captioner is loaded. The query
+        is written to workspace/next_query.txt and consumed by the next call
+        to search_candidates / crawl (main thread or prefetch).
+        """
         query = self._generate_query(next_batch_num)
-        # Save to file so _collect_video_urls can pick it up
         query_file = Path("./workspace") / "next_query.txt"
         query_file.write_text(query)
-        log.info("[QUERY-GEN] Pre-generated query for batch %d: '%s'", next_batch_num, query)
+        log.info("[QUERY-GEN] Wrote query for batch %d: %r", next_batch_num, query)
 
     def _parse_duration_seconds(self, duration_str: str) -> int | None:
         """Try to parse duration string to seconds."""
@@ -372,25 +385,31 @@ class VideoCrawler:
         return videos
 
     def llm_rank_candidates(self, candidates: list[dict], top_n: int,
-                            focus: str | None = None, consider: int = 10) -> list[dict]:
+                            focus: str | None = None, consider: int = 10
+                            ) -> tuple[list[dict], int]:
         """Use the loaded captioner LLM to rank candidates by relevance to the focus.
 
         Only considers the top `consider` candidates from the soft-scored input
         (keeps the LLM task small for a small model). Returns the LLM-ranked top_n
         followed by the remainder in their original order as tail-fill.
 
+        Returns a tuple (ranked_top_n, good_count) where good_count is how many
+        of the ranked candidates the LLM considered a good match (score >= 3).
+        The orchestrator uses good_count to decide whether to retry with a new
+        query when the pool doesn't contain enough matches.
+
         Falls back to the input order on ANY failure (missing captioner, parse error,
         empty pool). Never raises.
         """
         if not candidates:
-            return candidates
+            return candidates, 0
         if self._captioner is None or not self._captioner.is_loaded():
             log.debug("[LLM-RANK] Captioner not loaded — using soft-score order")
-            return candidates[:top_n]
+            return candidates[:top_n], 0
 
         focus = (focus or self.focus).strip()
         if not focus:
-            return candidates[:top_n]
+            return candidates[:top_n], 0
 
         # LLM sees only the head of the soft-scored pool — small models do badly
         # on long ranking tasks, so cap at `consider`.
@@ -402,48 +421,96 @@ class VideoCrawler:
             for i, c in enumerate(head)
         )
         prompt = (
-            "You are filtering adult video search results. Score each title 0-5 for how "
-            "well it matches the FOCUS below. A higher score means the title clearly describes "
-            "the focus. Score 0 if the title is off-topic or unrelated.\n\n"
+            "Score each adult video title 0-5 on how well it matches the FOCUS.\n"
+            "  5 = perfect match (clearly describes the focus subject + action)\n"
+            "  3 = partial match\n"
+            "  0 = off-topic\n\n"
             f"FOCUS:\n{focus}\n\n"
             f"TITLES:\n{title_block}\n\n"
-            "Output one line per title in the format 'N:score' (e.g. '1:5'). "
-            "Only output the scores, nothing else.\n\n"
-            "Scores:"
+            "Output one line per title in the format 'N:score'. Scores:"
         )
 
-        try:
-            result = self._captioner.generate_text(prompt, max_new_tokens=200, temperature=0.2)
-        except Exception as e:
-            log.warning("[LLM-RANK] generate_text failed: %s — falling back to soft scores", e)
-            return candidates[:top_n]
+        # We want enough perfect-match titles to actually fill the top_n slots
+        # with LLM-endorsed picks, not fall back to search-order tiebreakers.
+        # Require at least top_n titles with score 5 (perfect match). Retry up
+        # to 3 attempts at escalating temperature if the LLM returns sparse.
+        good_threshold = 5
+        min_good = top_n
+        scores = None
+        best_scores = None  # highest-good-count result across attempts
+        best_good_count = -1
 
-        # Parse "N:score" lines (tolerant of whitespace, commas, labels)
+        for attempt in range(3):
+            temp = 0.2 + 0.2 * attempt
+            scores = self._try_rank_call(prompt, temperature=temp, head_len=len(head))
+            if not scores:
+                log.info("[LLM-RANK] Attempt %d returned no parseable scores — retrying", attempt + 1)
+                continue
+            good_count = sum(1 for v in scores.values() if v >= good_threshold)
+            if good_count > best_good_count:
+                best_scores = scores
+                best_good_count = good_count
+            if good_count >= min_good:
+                break
+            log.info("[LLM-RANK] Attempt %d sparse: %d titles scored >= %d (need %d) — retrying",
+                     attempt + 1, good_count, good_threshold, min_good)
+
+        # Always use whichever attempt gave us the most good matches.
+        scores = best_scores
+        if not scores:
+            log.warning("[LLM-RANK] No parseable scores after 3 attempts — falling back to search order")
+            return candidates[:top_n], 0
+
+        good_count = sum(1 for v in scores.values() if v >= good_threshold)
+        if good_count < min_good:
+            log.warning("[LLM-RANK] Only %d/%d titles scored >= %d after retries — "
+                        "using sparse ranking anyway (still better than raw search order)",
+                        good_count, min_good, good_threshold)
+
+        # Rank head by LLM score desc, stable on original order for ties.
+        # Even when scoring is sparse, the high-scored titles get surfaced and
+        # zero-scored tail preserves search order — strictly better than passthrough.
+        indexed = list(enumerate(head))
+        indexed.sort(key=lambda x: scores.get(x[0], 0), reverse=True)
+        ranked_head = [c for _, c in indexed]
+
+        self._log_score_table(head, scores, tag=f"ranked ({good_count}/{len(head)} good)")
+
+        combined = ranked_head + tail
+        return combined[:top_n], good_count
+
+    def _log_score_table(self, head: list[dict], scores: dict[int, int], tag: str = ""):
+        """Log a sorted score table so you can see which titles got which scores."""
+        rows = sorted(
+            ((scores.get(i, 0), c.get("title", "") or "") for i, c in enumerate(head)),
+            key=lambda r: r[0],
+            reverse=True,
+        )
+        header = f"[LLM-RANK] Score table ({tag}):" if tag else "[LLM-RANK] Score table:"
+        log.info(header)
+        for score, title in rows:
+            log.info("  [%d] %s", score, title[:80])
+
+    def _try_rank_call(self, prompt: str, temperature: float, head_len: int) -> dict[int, int] | None:
+        """Single LLM call + parse for llm_rank_candidates. Returns None on failure."""
         import re as _re
+        try:
+            result = self._captioner.generate_text(prompt, max_new_tokens=200, temperature=temperature)
+        except Exception as e:
+            log.warning("[LLM-RANK] generate_text failed (temp=%.1f): %s", temperature, e)
+            return None
         scores: dict[int, int] = {}
         for line in result.splitlines():
             m = _re.search(r"(\d+)\s*[:\-=]\s*(\d+)", line)
             if m:
                 idx = int(m.group(1)) - 1
                 score = int(m.group(2))
-                if 0 <= idx < len(head):
+                if 0 <= idx < head_len:
                     scores[idx] = max(0, min(5, score))
-
         if not scores:
-            log.warning("[LLM-RANK] Parsed 0 scores from LLM output: %r — falling back", result[:200])
-            return candidates[:top_n]
-
-        # Rank head by LLM score desc, stable on original order for ties.
-        indexed = list(enumerate(head))
-        indexed.sort(key=lambda x: scores.get(x[0], 0), reverse=True)
-        ranked_head = [c for _, c in indexed]
-
-        score_summary = ",".join(str(scores.get(i, 0)) for i in range(len(head)))
-        log.info("[LLM-RANK] Ranked %d/%d candidates. Scores: [%s]",
-                 len(scores), len(head), score_summary)
-
-        combined = ranked_head + tail
-        return combined[:top_n]
+            log.debug("[LLM-RANK] Parsed 0 scores at temp=%.1f from: %r", temperature, result[:200])
+            return None
+        return scores
 
     def _collect_video_urls(self, batch_num: int, limit: int | None = None,
                             allow_query_gen: bool = True) -> list[dict]:
@@ -457,15 +524,18 @@ class VideoCrawler:
         seen = self._load_seen()
         candidates = []
 
-        # Use pre-generated query if available (from captioner LLM), else generate/fallback
+        # Consume the query the main thread already wrote via generate_next_query.
+        # If missing (edge cases: first batch, prefetch path, manual intervention),
+        # generate inline unless explicitly disabled (prefetch thread must pass
+        # allow_query_gen=False to avoid touching the main-thread captioner).
         query_file = Path("./workspace") / "next_query.txt"
         if query_file.exists():
             query = query_file.read_text().strip()
             query_file.unlink()
-            log.info("[QUERY] Using pre-generated: '%s'", query)
+            log.info("[QUERY] Search query: %r", query)
         else:
             if not allow_query_gen:
-                log.warning("[QUERY] No pre-generated query and LLM query-gen disabled "
+                log.warning("[QUERY] next_query.txt missing and LLM query-gen disabled "
                             "(prefetch path). Skipping this crawl.")
                 return []
             query = self._generate_query(batch_num)
@@ -495,6 +565,13 @@ class VideoCrawler:
                     continue
 
                 title = item.get("title", "") or ""
+
+                # Title blocklist — reject overrepresented uploaders/studios.
+                title_lc = title.lower()
+                blocked = next((b for b in self.title_blocklist if b in title_lc), None)
+                if blocked:
+                    log.info("[BLOCKLIST] Rejecting %r (matched %r)", title[:80], blocked)
+                    continue
 
                 # Duration filtering
                 dur = self._parse_duration_seconds(item.get("duration", ""))

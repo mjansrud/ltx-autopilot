@@ -12,25 +12,11 @@ extends: ../config.yaml
 
 crawler:
   focus: |
-    CORE SUBJECT: close-ups of an erect COCK (dick / penis) filling the frame.
-    Every query MUST include one of these keywords: cock, dick, blowjob, bj,
-    handjob, deepthroat, titfuck, titjob, cumshot, facial.
-
-    PRIMARY ACTIONS to rotate through (pick ONE per query):
-      - blowjob / deepthroat (mouth on cock, gagging, sloppy)
-      - handjob (stroking, pumping, jerking)
-      - titfuck / titjob (cock between big tits)
-      - cumshot / facial close-ups
-
-    STYLE modifiers to combine with the action:
-      pov, close up, extreme close up, tight, wet, glossy, hd.
-
-    Example query shapes (format only — do NOT copy verbatim, generate NEW ones):
-      - cock close up blowjob pov hd
-      - dick deepthroat pov hd
-      - handjob extreme close up hd
-      - titfuck cock close up hd
-      - sloppy bj pov hd
+    Adult videos where an erect penis (cock, dick) is the main subject of
+    the frame. The penis should be clearly visible and prominent throughout.
+    Main actions to rotate across batches: blowjobs, deepthroats, handjobs,
+    titfucks, cumshots, facials. Prefer POV perspective and wet, glossy,
+    high-quality footage.
 
   # Drop custom_urls for this session — we want fresh LLM queries only
   custom_urls: []
