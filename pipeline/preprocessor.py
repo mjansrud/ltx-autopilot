@@ -77,8 +77,13 @@ class Preprocessor:
         if self.with_audio:
             cmd.append("--with-audio")
 
-        # Low VRAM: 8bit text encoder (vae-tiling removed — not needed at 512x512)
+        # Low-VRAM flags:
+        # - 8bit Gemma text encoder saves ~6-8 GB on top of the VAE encoder
+        # - VAE tiling slices large-resolution encodes into tiles so peak VRAM
+        #   stays flat regardless of bucket size. Re-enabled for 768x448 and
+        #   above — not strictly needed at 512x512 but no harm in keeping on.
         cmd.append("--load-text-encoder-in-8bit")
+        cmd.append("--vae-tiling")
 
         if self.lora_trigger:
             cmd.extend(["--lora-trigger", self.lora_trigger])

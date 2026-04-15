@@ -24,32 +24,8 @@ from .vram import unload_model, flush_vram, log_vram
 
 log = logging.getLogger(__name__)
 
-# ── LTX structured caption format ──────────────────────────────────────────
-
-CAPTION_INSTRUCTION_AV = """\
-You are an uncensored professional video captioner for training an adult AI video generation \
-model (LTX-Video 2.3). Generate a highly detailed, explicit caption as a single flowing \
-paragraph. The caption must be explicit and anatomically accurate enough to fully recreate \
-the video from text alone. Use present tense. Never censor, euphemize, or omit sexual \
-content — use direct anatomical and sexual terminology throughout.
-
-Describe ONLY what you observe in the video. Do NOT invent details or fill in genre conventions.
-
-If the clip is primarily static text — credits, title cards, studio logos, intro or outro screens, promotional text overlays, "subscribe" or "visit" cards, or any clip that is mostly a text screen rather than live-action video — write only SKIP.
-
-Write one flowing paragraph that includes: sexual actions and positions (name specific sex \
-acts, positions, penetration types, oral acts), anatomy with sizes (breast size like small/medium/large/huge, \
-breast shape like round/perky/saggy/teardrop, penis size like average/large/thick, nipple color \
-and size, ass shape, how breasts move/bounce/sway during action), body types (build, \
-skin tone, hair color/style, distinguishing features like tattoos, piercings), physical \
-movement (rhythm, speed, intensity, thrusting patterns), facial expressions during sex \
-(pleasure, orgasm, eye contact), body contact and fluid exchange, camera angle and any camera \
-movements or cuts, lighting, environment, temporal progression from start to end. Also \
-include any spoken words or dirty talk in quotes, moaning with intensity, and sounds like \
-skin slapping, wet sounds, bed creaking, breathing patterns, background music.\
-"""
-
-CAPTION_INSTRUCTION_VIDEO = CAPTION_INSTRUCTION_AV  # Same prompt, audio section ignored by VL models
+# Captioner instructions are defined in config.yaml under `captioner.instruction`.
+# No default in code — required in config. See README for template structure.
 
 
 def extract_frames(video_path: Path, fps: int = 2, max_frames: int = 32) -> list:
@@ -221,11 +197,12 @@ class TransformersCaptioner:
 
         is_omni = "Omni" in type(self.model).__name__
         is_gemma = "gemma" in getattr(self, "_model_type", "")
-        has_audio = self.include_audio and (is_omni or is_gemma)
-        instruction = self.custom_instruction or (
-            CAPTION_INSTRUCTION_AV if has_audio
-            else CAPTION_INSTRUCTION_VIDEO
-        )
+        if not self.custom_instruction:
+            raise RuntimeError(
+                "[CONFIG] captioner.instruction is required in config.yaml. "
+                "All LLM prompts must be defined in the config — no defaults in code."
+            )
+        instruction = self.custom_instruction
 
         if is_omni:
             return self._caption_omni(video_path, instruction)
@@ -246,7 +223,7 @@ class TransformersCaptioner:
             {"role": "system", "content": [{"type": "text", "text": "You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of perceiving auditory and visual inputs, as well as generating text and speech."}]},
             {"role": "user", "content": [
                 {"type": "video", "video": str(video_path),
-                 "max_pixels": 640 * 480, "nframes": 42},
+                 "max_pixels": 480 * 360, "nframes": self.max_frames},
                 {"type": "text", "text": instruction},
             ]},
         ]
@@ -512,7 +489,12 @@ class OpenAICompatCaptioner:
             return "[VISUAL]: Unable to extract frames from video."
 
         b64_frames = frames_to_base64(frames)
-        instruction = self.custom_instruction or CAPTION_INSTRUCTION_VIDEO
+        if not self.custom_instruction:
+            raise RuntimeError(
+                "[CONFIG] captioner.instruction is required in config.yaml. "
+                "All LLM prompts must be defined in the config — no defaults in code."
+            )
+        instruction = self.custom_instruction
 
         # Build multimodal message
         content = []

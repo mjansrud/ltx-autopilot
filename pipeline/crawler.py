@@ -152,7 +152,8 @@ class VideoCrawler:
       4. Download with yt-dlp (handles the actual video extraction)
     """
 
-    def __init__(self, config: dict, server: LustpressServer, captioner=None):
+    def __init__(self, config: dict, server: LustpressServer, captioner=None,
+                 prompts: dict | None = None):
         self.server = server
         self._captioner = captioner
         self.focus = config.get("focus", "").strip()
@@ -160,6 +161,17 @@ class VideoCrawler:
             raise RuntimeError(
                 "crawler.focus is required in config — queries are always LLM-generated, "
                 "no static fallback. Set 'focus' under 'crawler:' in your config/session."
+            )
+        # All LLM prompts come from config.yaml (gitignored) — no defaults in
+        # code. Required keys: query_gen, eval_prompt, eval_prompt_example, rank.
+        self._prompts = prompts or {}
+        required = {"query_gen", "eval_prompt", "eval_prompt_example", "rank"}
+        missing = required - set(self._prompts.keys())
+        if missing:
+            raise RuntimeError(
+                f"[CONFIG] Missing required prompts in config.prompts: {sorted(missing)}. "
+                "All LLM prompts must be defined in config.yaml under the top-level "
+                "`prompts:` section."
             )
         self.sources = config.get("sources", ["xvideos", "xnxx", "eporner", "redtube"])
         self.max_per_batch = config.get("max_videos_per_batch", 8)
@@ -176,6 +188,18 @@ class VideoCrawler:
         ]
         self._config = config  # keep ref for removing consumed URLs
         Path(self.archive_path).parent.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _fill_prompt(template: str, **kwargs) -> str:
+        """Substitute {key} placeholders in a prompt template via plain replace.
+
+        Uses str.replace so users can freely use literal { and } in their prompt
+        templates without worrying about .format() escaping.
+        """
+        result = template
+        for key, value in kwargs.items():
+            result = result.replace("{" + key + "}", str(value))
+        return result
 
     def _generate_query(self, batch_num: int) -> str:
         """Use an LLM to generate a short search query based on session focus.
@@ -195,14 +219,7 @@ class VideoCrawler:
         if history_file.exists():
             recent = [ln for ln in history_file.read_text().splitlines() if ln.strip()][-20:]
 
-        prompt = (
-            "Write a brief adult video search phrase — the kind a real person quickly "
-            "types into the search bar on xvideos/xnxx/redtube. Think Google search, "
-            "not a description: a short natural phrase of a few words. "
-            "Fit the FOCUS.\n\n"
-            f"FOCUS:\n{self.focus}\n\n"
-            "Reply with only the search phrase."
-        )
+        prompt = self._fill_prompt(self._prompts["query_gen"], focus=self.focus)
 
         import re as _re
         last_result = ""
@@ -253,34 +270,16 @@ class VideoCrawler:
         if not focus or not focus.strip():
             raise RuntimeError("[EVAL-GEN] Empty focus — cannot generate eval prompts.")
 
-        # Generic, focus-neutral example to demonstrate the paragraph format.
-        example = (
-            "A medium shot from behind shows a woman on her knees with her hair pulled back, "
-            "her hands pressing into the mattress as her body moves forward and back in a steady rhythm. "
-            "She arches her shoulders down and lifts her hips slightly, hair swaying with each motion. "
-            "The room is lit by soft warm lamplight from a bedside table, casting gentle shadows across "
-            "the rumpled sheets. Quiet breathing, rhythmic wet sounds, and the faint creak of the bed frame."
-        )
+        example = self._prompts["eval_prompt_example"]
 
         prompts: list[str] = []
         for i in range(count):
             prev_block = "\n".join(f"- {p[:120]}..." for p in prompts) if prompts else "(none yet)"
-            llm_prompt = (
-                "Write ONE detailed scene description for a text-to-video adult model (LTX-2). "
-                "Write it as a SINGLE PARAGRAPH of 3-5 full sentences. Do NOT output a keyword list, "
-                "do NOT use bullet points, do NOT use labels like 'Shot:' or 'Scene:'. Each sentence "
-                "must be a complete grammatical sentence ending in a period.\n\n"
-                "The paragraph must cover, in this order, woven into normal prose:\n"
-                "  1. Shot type / camera angle (close-up, POV, medium, wide, from below, etc.)\n"
-                "  2. Brief subject appearance\n"
-                "  3. Detailed action and body movement\n"
-                "  4. Lighting and setting\n"
-                "  5. Sound details (moans, wet sounds, skin slapping, etc.)\n\n"
-                "EXAMPLE (different focus — copy the STYLE, not the content):\n"
-                f"{example}\n\n"
-                f"NOW WRITE ONE NEW SCENE for this focus:\n{focus}\n\n"
-                f"Already generated this eval round (do NOT repeat these setups):\n{prev_block}\n\n"
-                "Output ONLY the new paragraph, no preamble, no quotes, no labels, no numbering."
+            llm_prompt = self._fill_prompt(
+                self._prompts["eval_prompt"],
+                focus=focus,
+                example=example,
+                previous=prev_block,
             )
 
             last_result = ""
@@ -420,14 +419,10 @@ class VideoCrawler:
             f"{i+1}. {(c.get('title') or '').strip()[:120]}"
             for i, c in enumerate(head)
         )
-        prompt = (
-            "Score each adult video title 0-5 on how well it matches the FOCUS.\n"
-            "  5 = perfect match (clearly describes the focus subject + action)\n"
-            "  3 = partial match\n"
-            "  0 = off-topic\n\n"
-            f"FOCUS:\n{focus}\n\n"
-            f"TITLES:\n{title_block}\n\n"
-            "Output one line per title in the format 'N:score'. Scores:"
+        prompt = self._fill_prompt(
+            self._prompts["rank"],
+            focus=focus,
+            titles=title_block,
         )
 
         # We want enough perfect-match titles to actually fill the top_n slots

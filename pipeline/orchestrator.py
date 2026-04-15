@@ -87,7 +87,12 @@ class PipelineOrchestrator:
 
         # Initialize components (no models loaded yet)
         self.captioner = create_captioner(self.cfg["captioner"])
-        self.crawler = VideoCrawler(self.cfg["crawler"], self.lustpress, captioner=self.captioner)
+        self.crawler = VideoCrawler(
+            self.cfg["crawler"],
+            self.lustpress,
+            captioner=self.captioner,
+            prompts=self.cfg.get("prompts", {}),
+        )
         self.scene_splitter = SceneSplitter(
             self.cfg.get("scene_split", {}),
             self.cfg["ltx_trainer_dir"],
