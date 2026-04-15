@@ -15,15 +15,20 @@ log = logging.getLogger(__name__)
 class Preprocessor:
     def __init__(self, config: dict, training_config: dict, ltx_trainer_dir: str):
         self.trainer_dir = Path(ltx_trainer_dir)
+        self.config = config  # keep ref to re-read resolution_buckets per batch
         self.resolution_buckets = config.get("resolution_buckets", ["576x576x49"])
         self.with_audio = config.get("with_audio", True)
         self.lora_trigger = config.get("lora_trigger", None)
         self.model_path = training_config.get("model_checkpoint", "")
         self.text_encoder_path = training_config.get("text_encoder", "")
 
-    def process(self, metadata_file: Path, output_dir: Path) -> Path:
+    def process(self, metadata_file: Path, output_dir: Path, batch_num: int = 0) -> Path:
         """
         Run the LTX process_dataset.py to precompute latents.
+
+        Alternates resolution buckets per batch to avoid VRAM fragmentation:
+        - Even batches: first bucket (e.g. 640x384x81 for motion)
+        - Odd batches: second bucket (e.g. 768x448x41 for detail)
 
         Returns the precomputed data directory.
         """
@@ -51,8 +56,23 @@ class Preprocessor:
             "--output-dir", str(output_abs),
         ]
 
-        for bucket in self.resolution_buckets:
-            cmd.extend(["--resolution-buckets", bucket])
+        # Re-read resolution buckets from config.yaml so changes take effect without restart
+        import yaml
+        try:
+            cfg = yaml.safe_load(Path("config.yaml").read_text(encoding="utf-8"))
+            buckets = cfg.get("preprocessing", {}).get("resolution_buckets", self.resolution_buckets)
+        except Exception:
+            buckets = self.resolution_buckets
+
+        # Alternate buckets per batch to keep single shape per training run
+        if len(buckets) > 1:
+            bucket_idx = batch_num % len(buckets)
+            bucket = buckets[bucket_idx]
+            log.info("Batch %d using bucket: %s", batch_num, bucket)
+        else:
+            bucket = buckets[0]
+            log.info("Batch %d using bucket: %s", batch_num, bucket)
+        cmd.extend(["--resolution-buckets", bucket])
 
         if self.with_audio:
             cmd.append("--with-audio")
@@ -95,16 +115,47 @@ class Preprocessor:
         return output_dir
 
 
+def _derive_max_clip_seconds(preprocessing_config: dict) -> float:
+    """Compute how many seconds the trainer will actually consume from each scene.
+
+    Reads `preprocessing.resolution_buckets` (strings like "640x384x121") and
+    picks the max frame count, then divides by a conservative 24fps target
+    and adds a 1s buffer for ffmpeg keyframe-rounding slop. 121 frames → 6.0s.
+    """
+    buckets = preprocessing_config.get("resolution_buckets", [])
+    max_frames = 0
+    for b in buckets:
+        parts = str(b).split("x")
+        if len(parts) >= 3:
+            try:
+                max_frames = max(max_frames, int(parts[-1]))
+            except ValueError:
+                continue
+    if max_frames <= 0:
+        return 6.0  # sensible fallback if buckets are missing/unparseable
+    return max_frames / 24.0 + 1.0
+
+
 class SceneSplitter:
     """Wraps the LTX split_scenes.py script."""
 
-    def __init__(self, config: dict, ltx_trainer_dir: str):
+    def __init__(self, config: dict, ltx_trainer_dir: str, preprocessing_config: dict | None = None):
         self.trainer_dir = Path(ltx_trainer_dir)
         self.enabled = config.get("enabled", True)
         self.min_duration = config.get("min_scene_duration", "3s")
         self.max_duration = config.get("max_scene_duration", 30)
         self.max_scenes = config.get("max_scenes_per_video", None)
         self.detector = config.get("detector", "content")
+        # Trim each scene down to the training clip length so captioner and
+        # trainer operate on the same bytes — training only ever takes the
+        # first N frames of each scene, so a longer source clip wastes
+        # captioning compute without adding training value.
+        explicit = config.get("train_clip_max_seconds")
+        if explicit is not None:
+            self.train_clip_max_seconds = float(explicit)
+        else:
+            self.train_clip_max_seconds = _derive_max_clip_seconds(preprocessing_config or {})
+        log.info("SceneSplitter: train_clip_max_seconds=%.2fs", self.train_clip_max_seconds)
 
     def _parse_min_duration(self) -> float:
         """Parse min_duration string like '8s' to seconds."""
@@ -176,12 +227,19 @@ class SceneSplitter:
                 scenes = middle[:self.max_scenes]
             log.info("  Picked %d clips from middle of video", len(scenes))
 
-        # 4. Cut only the selected scenes with ffmpeg (fast copy, no re-encode)
+        # 4. Cut only the selected scenes with ffmpeg (fast copy, no re-encode).
+        # Cap cut duration at train_clip_max_seconds so captioning doesn't pay
+        # for frames the trainer will never see (trainer takes first 121 frames
+        # of each scene, ~4.84s at 25fps). Stream copy can only cut on
+        # keyframes so the effective length may round up to the next keyframe —
+        # good enough for both training (still uses first 121 frames) and
+        # captioning (2x faster per clip vs 11s scenes).
         stem = video.stem
         for i, (start, end) in enumerate(scenes):
             out_path = output_dir / f"{stem}-Scene-{i+1:03d}.mp4"
             ss = start.get_seconds()
             dur = (end - start).get_seconds()
+            dur = min(dur, self.train_clip_max_seconds)
             cmd = [
                 "ffmpeg", "-y", "-ss", f"{ss:.3f}", "-i", str(video),
                 "-t", f"{dur:.3f}",
@@ -194,4 +252,4 @@ class SceneSplitter:
             if result.returncode != 0:
                 log.warning("  ffmpeg failed for scene %d: %s", i+1, (result.stderr or "")[-200:])
 
-        log.info("  %s -> %d clips cut", video.name, len(scenes))
+        log.info("  %s -> %d clips cut (capped at %.1fs)", video.name, len(scenes), self.train_clip_max_seconds)
