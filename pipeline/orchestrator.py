@@ -236,19 +236,29 @@ class PipelineOrchestrator:
 
         return None
 
-    def _prefetch_batch(self, batch_num: int, work_dir: Path) -> tuple[list[Path], list[Path]]:
+    def _prefetch_batch(self, batch_num: int, work_dir: Path,
+                        candidates: list[dict] | None = None
+                        ) -> tuple[list[Path], list[Path]]:
         """Download + scene-split for a future batch (CPU only, no GPU).
 
         Runs in a background ThreadPoolExecutor. Never touches the captioner:
-        if `next_query.txt` isn't pre-populated by the main thread, the crawl
-        refuses the query-gen path and returns empty. (Main thread calling
-        into the captioner from a non-main thread races with WDDM.)
+        - If `candidates` is provided, the main thread already searched AND
+          LLM-ranked them while the captioner was loaded. We skip search
+          entirely and just download the pre-ranked URLs.
+        - Otherwise fall back to crawler.crawl(allow_query_gen=False), which
+          reads next_query.txt and does an unranked search. This is the
+          "best-effort" path when ranking couldn't be done upstream.
         """
         raw_dir = work_dir / "raw"
         scenes_dir = work_dir / "scenes"
         raw_dir.mkdir(parents=True, exist_ok=True)
 
-        videos = self.crawler.crawl(batch_num, raw_dir, allow_query_gen=False)
+        if candidates:
+            log.info("[PREFETCH] Downloading %d pre-ranked candidates for batch %d",
+                     len(candidates), batch_num)
+            videos = self.crawler.download_candidates(candidates, raw_dir)
+        else:
+            videos = self.crawler.crawl(batch_num, raw_dir, allow_query_gen=False)
         if not videos:
             return [], []
 
@@ -298,12 +308,19 @@ class PipelineOrchestrator:
         log.info("[EVAL-GEN] Consumed %d pre-generated eval prompts", len(prompts))
         return prompts
 
-    def _start_prefetch(self, batch_num: int):
-        """Start prefetching next batch in background thread."""
+    def _start_prefetch(self, batch_num: int, candidates: list[dict] | None = None):
+        """Start prefetching next batch in background thread.
+
+        If `candidates` is supplied, the main thread has already LLM-ranked
+        them and prefetch should just download. Otherwise prefetch does its
+        own unranked search (best-effort fallback).
+        """
         next_work = Path(f"./workspace/batch-{batch_num:04d}")
         if next_work.exists():
             shutil.rmtree(next_work, ignore_errors=True)
-        self._prefetch_future = self._prefetch_executor.submit(self._prefetch_batch, batch_num, next_work)
+        self._prefetch_future = self._prefetch_executor.submit(
+            self._prefetch_batch, batch_num, next_work, candidates
+        )
 
     def _collect_prefetch(self) -> tuple[list[Path], list[Path]] | None:
         """Collect prefetched data if available."""
@@ -758,22 +775,46 @@ class PipelineOrchestrator:
                     self.captioner.unload()
                     flush_vram()
 
-        # ── Pre-populate next_query.txt for the upcoming prefetch ─────
-        # The prefetch thread runs with allow_query_gen=False (it can't touch
-        # the main-thread captioner context without racing WDDM). So we must
-        # write the query here, while we're still on the main thread with the
-        # captioner loaded (fresh-download path). Cached path already handled
-        # this above. If the captioner isn't loaded (prefetched-path batches),
-        # we skip — prefetch-for-next-batch will then bail cleanly and the
-        # next batch falls through to its own fresh-download.
-        next_query_file = Path("./workspace") / "next_query.txt"
-        if not next_query_file.exists() and self.captioner.is_loaded():
-            self.crawler.generate_next_query(self.state.batch_num + 1)
+        # ── Pre-rank candidates for the upcoming prefetch ─────
+        # The prefetch thread never touches the captioner (would race WDDM
+        # against main-thread captioning). So while the captioner is still
+        # loaded on the main thread, do search + LLM rank for batch N+1 now
+        # and hand the ranked URL list to the prefetch worker. The worker
+        # skips search entirely and just downloads the pre-ranked picks.
+        #
+        # If the captioner isn't loaded here (cached-path batches already
+        # unloaded, prefetched-path batches never loaded), we skip ranking
+        # and let the prefetch fall back to an unranked search — still
+        # better than nothing, and the NEXT batch will fresh-download and
+        # rank properly.
+        next_batch = self.state.batch_num + 1
+        next_ranked_candidates: list[dict] | None = None
+
+        if self.captioner.is_loaded():
+            next_query_file = Path("./workspace") / "next_query.txt"
+            if not next_query_file.exists():
+                self.crawler.generate_next_query(next_batch)
+            try:
+                next_pool = self.crawler.search_candidates(
+                    next_batch, limit=self.crawler.max_per_batch * 4
+                )
+                if next_pool:
+                    next_ranked_candidates, next_good = self.crawler.llm_rank_candidates(
+                        next_pool, top_n=self.crawler.max_per_batch, consider=10
+                    )
+                    log.info("[PREFETCH] Pre-ranked %d candidates for batch %d (%d good)",
+                             len(next_ranked_candidates) if next_ranked_candidates else 0,
+                             next_batch, next_good)
+                else:
+                    log.info("[PREFETCH] No candidates from search for batch %d — prefetch will retry",
+                             next_batch)
+            except Exception as e:
+                log.warning("[PREFETCH] Pre-rank for batch %d failed: %s — falling back",
+                            next_batch, e)
 
         # ── Start prefetch early so scenes are ready by end of captioning ──
-        next_batch = self.state.batch_num + 1
         log.info("[PREFETCH] Starting download + split for batch %d in background", next_batch)
-        self._start_prefetch(next_batch)
+        self._start_prefetch(next_batch, candidates=next_ranked_candidates)
 
         # ── 3. Caption (skip if restored from cache) ─────────────
         if not cached:
