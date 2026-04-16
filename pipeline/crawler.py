@@ -87,6 +87,18 @@ class LustpressServer:
                 self.process.wait()
             log.info("Lustpress server stopped")
 
+    def ensure_healthy(self):
+        """Check if Lustpress is alive; restart if dead. Call before searching."""
+        if self._is_port_open() and self._is_server_alive():
+            return
+        log.warning("[LUSTPRESS] Server is not responding — restarting")
+        self.stop()
+        try:
+            self.start()
+            log.info("[LUSTPRESS] Server restarted successfully")
+        except RuntimeError:
+            log.error("[LUSTPRESS] Failed to restart server")
+
     def search(self, source: str, query: str, page: int = 1,
                sort: str = "mr") -> list[dict]:
         """Search a source for videos. Returns list of video result dicts."""
@@ -94,7 +106,7 @@ class LustpressServer:
         params = {"key": query, "page": page, "sort": sort}
 
         try:
-            resp = requests.get(url, params=params, timeout=30)
+            resp = requests.get(url, params=params, timeout=60)
             resp.raise_for_status()
             data = resp.json()
 
@@ -106,6 +118,9 @@ class LustpressServer:
             log.info("  %s search '%s': %d results", source, query, len(results))
             return results
 
+        except requests.ConnectionError:
+            log.error("Lustpress connection refused for %s — server may be dead", source)
+            return []
         except requests.RequestException as e:
             log.error("Lustpress request failed: %s", e)
             return []
@@ -130,7 +145,7 @@ class LustpressServer:
         """Get a random video from a source."""
         url = f"{self.base_url}/{source}/random"
         try:
-            resp = requests.get(url, timeout=30)
+            resp = requests.get(url, timeout=60)
             resp.raise_for_status()
             data = resp.json()
             if data.get("success"):
@@ -534,6 +549,11 @@ class VideoCrawler:
                             "(prefetch path). Skipping this crawl.")
                 return []
             query = self._generate_query(batch_num)
+
+        # Ensure Lustpress is alive before we fire search requests. If it
+        # died (node crash, OOM, etc.), restart it now instead of burning all
+        # 3 search attempts on connection-refused errors.
+        self.server.ensure_healthy()
 
         # Stay near the top of search results so query relevance dominates.
         # Pages >5 rapidly degrade into long-tail keyword matches on porn sites.
